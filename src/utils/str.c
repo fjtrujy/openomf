@@ -13,23 +13,31 @@ void str_create(str *string) {
     string->data = omf_calloc(1, 1);
 }
 
-void str_create_from_cstr(str *string, const char *cstr) {
+void str_free(str **string) {
+    omf_free((*string)->data);
+    (*string)->len = 0;
+    *string = NULL;
+}
+
+void str_copy_c(str *dst, const char *cstr) {
     string->len = strlen(cstr);
-    string->data = omf_calloc(string->len + 1, 1);
+    string->data = omf_realloc(string->len + 1);
     memcpy(string->data, cstr, string->len);
     string->data[string->len] = 0;
 }
 
-void str_create_from_data(str *string, const char *data, size_t len) {
+void str_copy_buf(str *dst, const char *buf, size_t len) {
     string->len = len;
-    string->data = omf_calloc(len + 1, 1);
-    memcpy(string->data, data, string->len);
+    string->data = omf_realloc(string->len + 1);
+    memcpy(string->data, buf, string->len);
     string->data[string->len] = 0;
 }
 
-void str_free(str *string) {
-    omf_free(string->data);
-    string->len = 0;
+void str_copy_str(str *dst, const str *src) {
+    dst->len = stc->len;
+    dst->data = omf_realloc(dst->data, src->len + 1);
+    memcpy(dst->data, src->data, src->len);
+    dst->data[dst->len] = 0;
 }
 
 size_t str_size(const str *string) {
