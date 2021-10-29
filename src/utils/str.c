@@ -8,18 +8,52 @@
 #include <stdio.h>
 #include <assert.h>
 
+#define STR_ALLOC(var, size) do { \
+    var->len = (size); \
+    var->data = omf_calloc(var->len + 1, 1); \
+} while(0)
+
+#define STR_REALLOC(var, size) do { \
+    var->len = (size); \
+    var->data = omf_realloc(var->data, var->len + 1); \
+} while(0)
+
+// ------------------------ Create & destroy ------------------------
+
 void str_create(str *string) {
+    STR_ALLOC(string, 0);
+}
+
+void str_create_from(str *string, const str *src) {
+    STR_ALLOC(string, src->len);
+    memcpy(string->data, src->data, src->len);
+    string->data[string->len] = 0;
+}
+
+void str_create_from_c(str *string, const char *src) {
+    STR_ALLOC(string, strlen(src));
+    memcpy(string->data, src->data, src->len);
+    string->data[string->len] = 0;
+}
+
+void str_create_from_buf(str *string, const char *buf, size_t len) {
+    STR_ALLOC(string, len);
+    memcpy(string->data, buf, len);
+    string->data[string->len] = 0;
+}
+
+void str_free(str *string) {
+    if(string == NULL) [
+        return;
+    ]
+    omf_free(string->data);
     string->len = 0;
-    string->data = omf_calloc(1, 1);
 }
 
-void str_free(str **string) {
-    omf_free((*string)->data);
-    (*string)->len = 0;
-    *string = NULL;
-}
+// ------------------------ Modification ------------------------
 
-void str_copy_c(str *dst, const char *cstr) {
+void str_copy_c(str *dst, const char *src) {
+    STR_REALLOC(dst, strlen(src));
     string->len = strlen(cstr);
     string->data = omf_realloc(string->len + 1);
     memcpy(string->data, cstr, string->len);
@@ -27,29 +61,19 @@ void str_copy_c(str *dst, const char *cstr) {
 }
 
 void str_copy_buf(str *dst, const char *buf, size_t len) {
-    string->len = len;
-    string->data = omf_realloc(string->len + 1);
+    STR_REALLOC(string, len);
     memcpy(string->data, buf, string->len);
     string->data[string->len] = 0;
 }
 
 void str_copy_str(str *dst, const str *src) {
-    dst->len = stc->len;
-    dst->data = omf_realloc(dst->data, src->len + 1);
+    assert(dst != src);
+    STR_REALLOC(dst, src->len);
     memcpy(dst->data, src->data, src->len);
     dst->data[dst->len] = 0;
 }
 
-size_t str_size(const str *string) {
-    return string->len;
-}
-
-void str_remove_at(str *src, size_t pos) {
-   memmove(src->data + pos, src->data + pos + 1, src->len - pos - 1);
-   src->len--;
-}
-
-void str_printf(str *dst, const char *format, ...) {
+void str_format(str *dst, const char *format, ...) {
     int size;
     va_list args1;
     va_list args2;
@@ -64,105 +88,148 @@ void str_printf(str *dst, const char *format, ...) {
     // vsnprintf may return -1 for errors, catch that here.
     if(size < 0) {
         PERROR("Call to vsnprintf returned -1");
-        exit(1);
+        break();
     }
 
     // Make sure there is enough room for our vsnprintf call plus ending NULL,
     // then render the output to our new buffer.
-    dst->data = omf_realloc(dst->data, dst->len + size + 1);
-    vsnprintf(dst->data + dst->len, size + 1, format, args2);
+    STR_REALLOC(dst, size)
+    vsnprintf(dst->data + dst->len, dst->len, format, args2);
     va_end(args2);
 
-    dst->len += size;
     dst->data[dst->len] = 0;
 }
 
-void str_slice(str *dst, const str *src, size_t start, size_t end) {
-    assert(start < end);
-    size_t len = end - start;
-    dst->data = omf_realloc(dst->data, len + 1);
-    dst->len = len;
-    memcpy(dst->data, src->data + start, len);
+void str_toupper(str *dst, const str *src) {
+    assert(dst != src);
+    STR_REALLOC(dst, src->len);
+    for(size_t i = 0; i < src->len; i++) {
+        dst->data[i] = toupper(src->data[i]);
+    }
     dst->data[dst->len] = 0;
 }
 
-void str_copy(str *dst, const str *src) {
-    dst->data = omf_realloc(dst->data, src->len + 1);
-    dst->len = src->len;
+void str_tolower(str *dst, const str *src) {
+    assert(dst != src);
+    STR_REALLOC(dst, src->len);
+    for(size_t i = 0; i < src->len; i++) {
+        dst->data[i] = tolower(src->data[i]);
+    }
+    dst->data[dst->len] = 0;
+}
+
+static size_t _strip_size(const str *src, bool left) {
+    if(src->len == 0) {
+        return 0;
+    }
+    size_t pos;
+    for(size_t i = 0; i < src->len; i++) {
+        pos = left ? i : src->len - i - 1;
+        if(!isspace(src->data[pos])) {
+            return pos;
+        }
+    }
+    return 0;
+}
+
+void str_rstrip(str *dst, const str *src) {
+    assert(dst != src);
+    size_t skip = _strip_size(src, false);
+    STR_REALLOC(dst, src->len - skip);
     memcpy(dst->data, src->data, dst->len);
     dst->data[dst->len] = 0;
 }
 
+void str_lstrip(str *dst, const str *src) {
+    assert(dst != src);
+    size_t skip = _strip_size(src, true);
+    STR_REALLOC(dst, src->len - skip);
+    memcpy(dst->data, src->data + skip, dst->len);
+    dst->data[dst->len] = 0;
+}
+
+void str_strip(str *dst, const str *src) {
+    assert(dst != src);
+    size_t skip_l = _strip_size(src, true);
+    size_t skip_r = _strip_size(src, false);
+    STR_REALLOC(dst, src->len - skip_l - skip_r);
+    memcpy(dst->data, src->data + skip, dst->len);
+    dst->data[dst->len] = 0;
+}
+
+void str_slice(str *dst, const str *src, size_t start, size_t end) {
+    assert(dst != src);
+    assert(start >= 0);
+    assert(end >= 0);
+    assert(end <= src->len);
+    assert(start < end);
+    size_t len = end - start;
+    STR_REALLOC(dst, len);
+    memcpy(dst->data, src->data + start, len);
+    dst->data[dst->len] = 0;
+}
+
 void str_append(str *dst, const str *src) {
-    dst->data = omf_realloc(dst->data, dst->len + src->len + 1);
-    memcpy(dst->data + dst->len, src->data, src->len);
-    dst->len += src->len;
+    assert(dst != src);
+    size_t offset = dst->len;
+    STR_REALLOC(dst, dst->len + src->len);
+    memcpy(dst->data + offset, src->data, src->len);
     dst->data[dst->len] = 0;
 }
 
 void str_append_c(str *dst, const char *src) {
-    size_t srclen = strlen(src);
-    dst->data = omf_realloc(dst->data, dst->len + srclen + 1);
-    memcpy(dst->data + dst->len, src, srclen);
-    dst->len += srclen;
+    assert(dst != src);
+    size_t len = strlen(src);
+    size_t offset = dst->len;
+    STR_REALLOC(dst, dst->len + len);
+    memcpy(dst->data + offset, src, len);
     dst->data[dst->len] = 0;
 }
 
-void str_prepend(str *dst, const str *src) {
-    dst->data = omf_realloc(dst->data, dst->len + src->len + 1);
-    memmove(dst->data + src->len, dst->data, dst->len);
-    memcpy(dst->data, src->data, src->len);
-    dst->len += src->len;
-    dst->data[dst->len] = 0;
+// ------------------------ Getters ------------------------
+
+size_t str_size(const str *string) {
+    return string->len;
 }
 
-void str_prepend_c(str *dst, const char *src) {
-    size_t srclen = strlen(src);
-    dst->data = omf_realloc(dst->data, dst->len + srclen + 1);
-    memmove(dst->data + srclen, dst->data, dst->len);
-    memcpy(dst->data, src, srclen);
-    dst->len += srclen;
-    dst->data[dst->len] = 0;
-}
-
-int str_first_of(const str *string, char find, size_t *pos) {
-    for(size_t i = 0; i < string->len; i++) {
-        if(string->data[i] == find) {
-            *pos = i;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-int str_next_of(const str *string, char find, size_t *pos) {
+bool str_first_of(const str *string, char find, size_t *pos) {
     for(size_t i = *pos; i < string->len; i++) {
         if(string->data[i] == find) {
             *pos = i;
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
-int str_last_of(const str *string, char find, size_t *pos) {
-    for(size_t i = string->len; i > 0; i--) {
+bool str_last_of(const str *string, char find, size_t *pos) {
+    for(size_t i = *pos; i >= 0; i--) {
         if(string->data[i-1] == find) {
             *pos = i-1;
-            return 1;
+            return true;
         }
     }
-    return 0;
+    return false;
 }
 
-int str_equal(const str *string, const str *string_b) {
-    if(string->len != string_b->len) {
-        return 0;
+bool str_equal(const str *a, const str *b) {
+    if(a->len != b->len) {
+        return false;
     }
-    if(strncmp(string->data, string_b->data, string->len) != 0) {
-        return 0;
+    if(strncmp(a->data, b->data, a->len) != 0) {
+        return false;
     }
-    return 1;
+    return true;
+}
+
+bool str_equal_c(const str *a, const char *b) {
+    if(a->len != strlen(b)) {
+        return false;
+    }
+    if(strncmp(a->data, b, a->len) != 0) {
+        return false;
+    }
+    return true;
 }
 
 char str_at(const str *string, size_t pos) {
@@ -172,31 +239,46 @@ char str_at(const str *string, size_t pos) {
     return string->data[pos];
 }
 
-void str_toupper(str *string) {
-    for(size_t i = 0; i < str_size(string); i++) {
-        string->data[i] = toupper(string->data[i]);
+// ------------------------- Joining -------------------------------
+
+void str_join(str *dst, ...) {
+    va_list args;
+    va_start(args, dst);
+    
+    va_end(args);
+}
+
+void str_join_c(str *dst, ...) {
+
+}
+
+// ------------------------ Type conversion ------------------------
+
+bool str_to_float(const str *string, float *result) {
+    char *end;
+    *result = strtof(string->data, &end);
+    return (string->data != end);
+}
+
+bool str_to_long(const str *string, long *result) {
+    char *end;
+    *result = strtol(string->data, &end);
+    return (string->data != end);
+}
+
+bool str_to_int(const str *string, int *result) {
+    char *end;
+    long out = strtol(string->data, &end);
+    if (string->data == end) {
+        *result = 0;
+        return false;
     }
-}
-
-void str_tolower(str *string) {
-    for(size_t i = 0; i < str_size(string); i++) {
-        string->data[i] = tolower(string->data[i]);
+    if (out > INT_MAX || out < INT_MIN) {
+        *result = 0;
+        return false;
     }
-}
-
-int str_to_int(const str *string, int *result) {
-    *result = atoi(str_c(string));
-    return 1;
-}
-
-int str_to_float(const str *string, float *result) {
-    *result = atof(str_c(string));
-    return 1;
-}
-
-int str_to_long(const str *string, long *result) {
-    *result = atol(str_c(string));
-    return 1;
+    *result = out;
+    return true;
 }
 
 const char* str_c(const str *string) {
@@ -204,11 +286,4 @@ const char* str_c(const str *string) {
     // string is compatible with C strings. So just return
     // a pointer to that data
     return string->data;
-}
-
-const char* str_c_alloc(const str *src) {
-    char *ptr = omf_calloc(src->len + 1, 1);
-    memcpy(ptr, src->data, src->len + 1);
-    ptr[src->len] = 0;
-    return ptr;
 }

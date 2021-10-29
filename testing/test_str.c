@@ -154,13 +154,13 @@ void test_equal(void) {
 void test_printf(void) {
     str test;
     str_create(&test);
-    str_printf(&test, "%s, %d\n", "this is a test", 100);
+    str_format(&test, "%s, %d\n", "this is a test", 100);
 
     CU_ASSERT(test.len == 20);
     CU_ASSERT_PTR_NOT_NULL(test.data);
     CU_ASSERT(test.data[20] == 0);
 
-    str_printf(&test, "over %d thousaaand!\n", 9);
+    str_format(&test, "over %d thousaaand!\n", 9);
 
     CU_ASSERT(test.len == 39);
     CU_ASSERT_PTR_NOT_NULL(test.data);
