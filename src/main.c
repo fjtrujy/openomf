@@ -23,6 +23,13 @@
 #include "utils/allocator.h"
 #include "utils/compat.h"
 
+#if defined(PSP)
+#include <pspmoduleinfo.h>
+#include <pspthreadman.h>
+PSP_MODULE_INFO("Open One Must Fall 2097", 0, 1, 1);
+PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER|THREAD_ATTR_VFPU);
+#endif
+
 #ifndef SHA1_HASH
     const char *git_sha1_hash = "";
 #else
