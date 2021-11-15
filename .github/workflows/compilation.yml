@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  repository_dispatch:
+    types: [run_build]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os[0] }}
+    strategy:
+      matrix:
+        os: [[macos-latest, bash], [macos-11, bash], [ubuntu-latest, bash], [windows-latest, msys2]]
+        # os: [[macos-latest, bash], [macos-11, bash], [ubuntu-latest, bash]]
+    defaults:
+     run:
+      shell: ${{ matrix.os[1] }} {0}
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Install Ubuntu Dependencies
+      if: matrix.os[0] == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get -y install cmake libargtable2-dev libcunit1-dev libopenal-dev libconfuse-dev libenet-dev \
+          libsdl2-dev libxmp-dev libpng-dev
+        echo "MSYSTEM=x64" >> $GITHUB_ENV
+
+    - name: Install Mac Dependencies
+      if: startsWith( matrix.os[0], 'macos' )
+      run: |
+        brew update
+        brew install cmake argtable cunit openal-soft confuse enet sdl2 libxmp libpng
+        echo "MSYSTEM=x64" >> $GITHUB_ENV
+
+    - name: Install in MSYS2
+      if: matrix.os[0] == 'windows-latest'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW32
+        install: |
+          base-devel git make cmake binutils mingw-w64-i686-gcc mingw-w64-i686-dlfcn mingw-w64-i686-mpc 
+          mingw-w64-i686-cmake mingw-w64-i686-extra-cmake-modules mingw-w64-i686-make mingw-w64-i686-ninja
+          mingw-w64-i686-argtable mingw-w64-i686-cunit mingw-w64-i686-openal
+          mingw-w64-i686-confuse mingw-w64-i686-enet mingw-w64-i686-SDL2 mingw-w64-i686-libpng
+        update: true
+        shell: msys2 {0}
+
+    - shell: msys2 {0}
+      if: matrix.os[0] == 'windows-latest'
+      run: |
+        git clone https://github.com/libxmp/libxmp
+        cd libxmp
+        git rev-parse HEAD
+        mkdir build && cd build
+        cmake -G "Unix Makefiles" ..
+        make -j$(getconf _NPROCESSORS_ONLN)
+        make -j$(getconf _NPROCESSORS_ONLN) install
+
+    - name: Run Tests
+      run: |
+        mkdir build-test && cd build-test
+        cmake -DCMAKE_BUILD_TYPE=Release -DUSE_TESTS=On -DUSE_TOOLS=On ..
+        make -j$(getconf _NPROCESSORS_ONLN)
+        make -j$(getconf _NPROCESSORS_ONLN) test ARGS="-V"
+
+    - name: Generate Release
+      run: |
+        mkdir build-release && cd build-release
+        cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=openomf ..
+        make -j$(getconf _NPROCESSORS_ONLN)
+
+  build-Dockers:
+    runs-on: ubuntu-latest
+    container: ${{ matrix.os }}:${{ matrix.tag }}
+    strategy:
+      matrix:
+        include:
+         - os: i386/ubuntu
+           tag: bionic
+         - os: fedora
+           tag: latest
+
+    steps:
+    - name: Checkout tools repo
+      if: matrix.os == 'i386/ubuntu'
+      uses: actions/checkout@v1
+
+    - name: Checkout tools repo
+      if: matrix.os == 'fedora'
+      uses: actions/checkout@v2
+
+    - name: Install Ubuntu Dependencies
+      if: matrix.os == 'i386/ubuntu'
+      run: |
+        apt-get -y update
+        DEBIAN_FRONTEND="noninteractive" apt-get -y install git gcc make cmake libargtable2-dev libcunit1-dev \
+        libopenal-dev libconfuse-dev libenet-dev libsdl2-dev libxmp-dev libpng-dev
+
+    - name: Install dependencies Fedora
+      if: matrix.os == 'fedora'
+      run: |
+        dnf -y install @development-tools gcc gcc-c++ g++ make cmake argtable-devel CUnit-devel openal-soft libconfuse-devel \
+        enet-devel SDL2-devel libxmp-devel libpng-devel
+
+    - name: Run Tests
+      run: |
+        mkdir build-test && cd build-test
+        cmake -DCMAKE_BUILD_TYPE=Release -DUSE_TESTS=On ..
+        make -j$(getconf _NPROCESSORS_ONLN)
+        make -j$(getconf _NPROCESSORS_ONLN) test ARGS="-V"
+
+    - name: Generate Release
+      run: |
+        mkdir build-release && cd build-release
+        cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=openomf ..
+        make -j$(getconf _NPROCESSORS_ONLN)
