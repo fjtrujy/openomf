@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <ctype.h>
 #include "console/console.h"
 #include "console/console_type.h"
 #include "game/gui/menu_background.h"

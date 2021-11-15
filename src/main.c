@@ -28,6 +28,7 @@
 #include <pspthreadman.h>
 PSP_MODULE_INFO("Open One Must Fall 2097", 0, 1, 1);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER|THREAD_ATTR_VFPU);
+PSP_HEAP_SIZE_KB(15 * 1024);
 #endif
 
 #ifndef SHA1_HASH
@@ -192,7 +193,7 @@ int main(int argc, char *argv[]) {
     INFO("Running on platform: %s", SDL_GetPlatform());
 
 #ifndef STANDALONE_SERVER
-    if(SDL_InitSubSystem(SDL_INIT_JOYSTICK|SDL_INIT_GAMECONTROLLER|SDL_INIT_HAPTIC)) {
+    if(SDL_InitSubSystem(SDL_INIT_JOYSTICK|SDL_INIT_GAMECONTROLLER)) {
         err_msgbox("SDL2 Initialization failed: %s", SDL_GetError());
         goto exit_2;
     }

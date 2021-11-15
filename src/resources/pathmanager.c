@@ -79,7 +79,7 @@ int pm_init() {
 
     // Set default base dirs for resources and plugins
     int m_ok = 0;
-    if(pm_in_release_mode()) {
+    if(pm_in_release_mode() || !strcasecmp(SDL_GetPlatform(), "PlayStation Portable")) {
         // where is the openomf binary, if this call fails we will look for resources in ./resources
         bin_base_dir = SDL_GetBasePath();
         if(bin_base_dir != NULL) {
@@ -100,6 +100,12 @@ int pm_init() {
                 // if run from an app bundle, so we can use this as-is
                 local_path_build(RESOURCE_PATH, bin_base_dir, "");
                 local_path_build(PLUGIN_PATH, bin_base_dir, "plugins/");
+                m_ok = 1;
+            } else if(!strcasecmp(SDL_GetPlatform(), "PlayStation Portable")) {
+                // on OSX, GetBasePath returns the 'Resources' directory
+                // if run from an app bundle, so we can use this as-is
+                local_path_build(RESOURCE_PATH, bin_base_dir, "openomfproject/openomf/resources/");
+                local_path_build(PLUGIN_PATH, bin_base_dir, "openomfproject/openomf/plugins/");
                 m_ok = 1;
             }
             // any other platform will look in ./resources
