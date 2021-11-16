@@ -57,9 +57,6 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/platform.h.in ${CMAKE_CURRENT
 if(USE_DUMB)
     find_package(dumb)
     add_definitions(-DUSE_DUMB)
-    if(MINGW)
-        add_definitions(-D_FILE_OFFSET_BITS=64)
-    endif()
 endif()
 
 # If XMP has been selected, attempt to find it
@@ -76,15 +73,8 @@ else()
     message(STATUS "Note! No audio sink selected; Music/sounds will not play.")
 endif()
 
-# When building with MingW, do not look for Intl
-# Also, use static libgcc when on mingw
-if(MINGW)
-    set(LIBINTL_INCLUDE_DIR "")
-    set(LIBINTL_LIBRARIES "")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static-libgcc")
-else()
-    find_package(Intl)
-endif()
+
+find_package(Intl)
 
 # If we want to build support for vorbis streaming, find these too
 if(USE_OGGVORBIS)
@@ -151,11 +141,6 @@ if(USE_OGGVORBIS)
     set(CORELIBS ${CORELIBS} ${VORBISFILE_LIBRARY} ${VORBIS_LIBRARY} ${OGG_LIBRARY})
 endif()
 
-# MingW build should add mingw32 lib
-if(MINGW)
-    set(CORELIBS mingw32 ${CORELIBS})
-endif()
-
 # On windows, add winsock2 and winmm
 if(WIN32)
     set(CORELIBS ${CORELIBS} ws2_32 winmm)
@@ -220,13 +205,6 @@ if(USE_SANITIZERS)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address,undefined")
     SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address,undefined")
     message(STATUS "DEBUG: Asan and Ubsan enabled")
-endif()
-
-# Don't show console on mingw in release builds
-if(MINGW)
-    if(NOT ${CMAKE_BUILD_TYPE} MATCHES "Debug")
-        set_target_properties(openomf PROPERTIES LINK_FLAGS "-mwindows")
-    endif(NOT ${CMAKE_BUILD_TYPE} MATCHES "Debug")
 endif()
 
 # Link options for main binary
