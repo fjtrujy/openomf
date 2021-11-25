@@ -247,7 +247,7 @@ void surface_convert_to_rgba(surface *sur, screen_palette *pal, int pal_offset) 
     }
 
     char *pixels = omf_calloc(1, sur->w * sur->h * 4);
-    surface_to_rgba(sur, pixels, pal, NULL, pal_offset);
+    surface_to_rgba(sur, pixels, pal, NULL, pal_offset, sur->w);
 
     // Free old data
     omf_free(sur->data);
@@ -261,15 +261,34 @@ void surface_to_rgba(surface *sur,
                      char *dst,
                      screen_palette *pal,
                      char *remap_table,
-                     uint8_t pal_offset) {
-
+                     uint8_t pal_offset,
+                     int pitch) {
+    int pitch_w = pitch / 4;
+    
     if(sur->type == SURFACE_TYPE_RGBA) {
-        memcpy(dst, sur->data, sur->w * sur->h * 4);
+        if ( pitch_w == sur->w) {
+            memcpy(dst, sur->data, sur->w * sur->h * 4);
+        } else {
+            char *dst_line = dst;
+            char *src_line = sur->data;
+            for (int i= 0; i < sur->h; i++) {
+                memcpy(dst_line, src_line, sur->w * 4);
+                dst_line += pitch;
+                src_line += sur->w * 4;
+            }
+        }
+        
     } else {
         int n = 0;
         uint8_t idx = 0;
+        char *dst_tmp = dst;
         for(int i = 0; i < sur->w * sur->h; i++) {
-            n = i * 4;
+            // Skip stdride values
+            if (pitch_w != 0 && pitch_w != sur->w && i !=0 && i % sur->w == 0) {
+                int stdride = (pitch_w - sur->w) * 4;
+                dst_tmp += stdride;
+            }
+            
             if(remap_table != NULL) {
                 idx = (uint8_t)remap_table[(uint8_t)sur->data[i]];
             } else {
@@ -282,10 +301,10 @@ void surface_to_rgba(surface *sur,
             if(idx < 48) {
                 idx += pal_offset;
             }
-            *(dst + n + 0) = pal->data[idx][0];
-            *(dst + n + 1) = pal->data[idx][1];
-            *(dst + n + 2) = pal->data[idx][2];
-            *(dst + n + 3) = (sur->stencil[i] == 1) ? 0xFF : 0;
+            *dst_tmp++ = pal->data[idx][0];
+            *dst_tmp++ = pal->data[idx][1];
+            *dst_tmp++ = pal->data[idx][2];
+            *dst_tmp++ = (sur->stencil[i] == 1) ? 0xFF : 0;
         }
     }
 }
@@ -300,7 +319,7 @@ int surface_to_texture(surface *src,
     void *pixels;
     int pitch;
     if(SDL_LockTexture(tex, NULL, &pixels, &pitch) == 0) {
-        surface_to_rgba(src, pixels, pal, remap_table, pal_offset);
+        surface_to_rgba(src, pixels, pal, remap_table, pal_offset, pitch);
         SDL_UnlockTexture(tex);
         return 0;
     }

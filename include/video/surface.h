@@ -47,7 +47,8 @@ void surface_to_rgba(surface *sur,
                      char *dst,
                      screen_palette *pal,
                      char *remap_table,
-                     uint8_t pal_offset);
+                     uint8_t pal_offset,
+                     int pitch);
 void surface_additive_blit(surface *dst,
                            surface *src,
                            int dst_x, int dst_y,

@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        docker_tag: [fjtrujy/pspdev]
+        docker_tag: [pspdev/pspdev]
 
     container: ${{ matrix.docker_tag }}:latest
     steps:
@@ -32,7 +32,7 @@ jobs:
         cd build
         cmake -Wno-dev -DCMAKE_TOOLCHAIN_FILE=$PSPDEV/psp/share/pspdev.cmake -DCMAKE_INSTALL_PREFIX=${PSPDEV}/psp -DBUILD_SHARED_LIBS=OF \
           -DUSE_OPENAL=OFF -DIntl_INCLUDE_DIR=${PSPDEV}/psp/include \
-          -DSTATIC_LIBRARY_FLAGS="-lGL -lpspvram -lpspvfpu -lpspgu -lpspdisplay -lpspge -lpspaudio -lpsphprm -lpsprtc" ..
+          -DSTATIC_LIBRARY_FLAGS="-lSDL2main -lGL -lpspvram -lpspvfpu -lpspgu -lpspdisplay -lpspge -lpspaudio -lpsphprm -lpsprtc" ..
         make -j$(getconf _NPROCESSORS_ONLN)
         psp-fixup-imports openomf
         mksfoex -d MEMSIZE=1 'Open One Must Fall 2097' PARAM.SFO
@@ -40,43 +40,6 @@ jobs:
         pack-pbp EBOOT.PBP PARAM.SFO NULL  \
           NULL NULL NULL  \
           NULL  openomf_strip.elf NULL
-        
-    - name: Get short SHA
-      id: slug
-      run: echo "::set-output name=sha8::$(echo ${GITHUB_SHA} | cut -c1-8)"
-
-    - name: Upload artifacts
-      if: ${{ success() }}
-      uses: actions/upload-artifact@v2
-      with:
-        name: openomf-${{ steps.slug.outputs.sha8 }}
-        path: |
-          build/openomf
-          build/EBOOT.PBP
-
-  build-Dockers:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        docker_tag: [fjtrujy/pspdev]
-        path: openomf_0.6.6-${{ steps.slug.outputs.sha8 }}_amd64.deb
-    container: ${{ matrix.docker_tag }}:latest
-    steps:
-    - uses: actions/checkout@v2
-
-    - name: Install dependencies
-      run: |
-        apk add build-base git bash cmake
-    
-
-    - name: Compile project
-      run: |
-        mkdir build
-        cd build
-        cmake -Wno-dev -DCMAKE_TOOLCHAIN_FILE=$PSPDEV/psp/share/pspdev.cmake -DCMAKE_INSTALL_PREFIX=${PSPDEV}/psp -DBUILD_SHARED_LIBS=OF \
-          -DUSE_OPENAL=OFF -DIntl_INCLUDE_DIR=${PSPDEV}/psp/include \
-          -DSTATIC_LIBRARY_FLAGS="-lGL -lpspvram -lpspvfpu -lpspgu -lpspdisplay -lpspge -lpspaudio -lpsphprm -lpsprtc" ..
-        make -j$(getconf _NPROCESSORS_ONLN)
         
     - name: Get short SHA
       id: slug

@@ -164,7 +164,7 @@ SDL_Texture* tcache_get(surface *sur,
                        sur->w * cache->scale_factor,
                        sur->h * cache->scale_factor);
 
-        surface_to_rgba(sur, raw, pal, remap_table, pal_offset);
+        surface_to_rgba(sur, raw, pal, remap_table, pal_offset, sur->w);
         scaler_scale(cache->scaler, raw, scaled.data, sur->w, sur->h, cache->scale_factor);
         surface_to_texture(&scaled, val->tex, pal, remap_table, pal_offset);
         surface_free(&scaled);

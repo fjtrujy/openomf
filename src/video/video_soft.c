@@ -59,7 +59,7 @@ void soft_render_finish(video_state *state) {
     SDL_Surface *low_s;
 
     // Blit lower
-    surface_to_rgba(&sr->lower, sr->tmp_normal, state->cur_palette, NULL, 0);
+    surface_to_rgba(&sr->lower, sr->tmp_normal, state->cur_palette, NULL, 0, 0);
 
     // Scale if necessary
     if(state->scale_factor > 1) {
@@ -113,7 +113,7 @@ void soft_render_sprite_fsot(
             surface_alpha_blit(&sr->lower, sur, dst->x, dst->y, flip_mode);
         }
     } else {
-        surface_to_rgba(sur, sr->tmp_normal, state->cur_palette, NULL, 0);
+        surface_to_rgba(sur, sr->tmp_normal, state->cur_palette, NULL, 0, 0);
         SDL_Surface *s = surface_from_pixels(sr->tmp_normal, sur->w, sur->h);
         SDL_SetSurfaceAlphaMod(s, opacity);
         SDL_SetSurfaceColorMod(s, color_mod.r, color_mod.g, color_mod.b);
