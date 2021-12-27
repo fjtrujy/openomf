@@ -25,6 +25,13 @@ jobs:
       run: |
         apk add build-base git bash cmake
     
+    - name: Compile & Install SDL2
+      run: |
+        git clone -b psp-render-to-texture-attempt-2 https://github.com/stdgregwar/SDL.git 
+        cd SDL && mkdir build && cd build 
+        psp-cmake ..
+        make -j$(getconf _NPROCESSORS_ONLN)
+        make -j$(getconf _NPROCESSORS_ONLN) install
 
     - name: Compile project
       run: |
@@ -32,7 +39,7 @@ jobs:
         cd build
         cmake -Wno-dev -DCMAKE_TOOLCHAIN_FILE=$PSPDEV/psp/share/pspdev.cmake -DCMAKE_INSTALL_PREFIX=${PSPDEV}/psp -DBUILD_SHARED_LIBS=OF \
           -DUSE_OPENAL=OFF -DIntl_INCLUDE_DIR=${PSPDEV}/psp/include \
-          -DSTATIC_LIBRARY_FLAGS="-lSDL2main -lGL -lpspvram -lpspvfpu -lpspgu -lpspdisplay -lpspge -lpspaudio -lpsphprm -lpsprtc" ..
+          -DSTATIC_LIBRARY_FLAGS="-lSDL2main -lGL -lpspvram -lpspvfpu -lpspgu -lpspdisplay -lpspge -lpspaudio -lpsphprm -lpsprtc -lpspctrl" ..
         make -j$(getconf _NPROCESSORS_ONLN)
         psp-fixup-imports openomf
         mksfoex -d MEMSIZE=1 'Open One Must Fall 2097' PARAM.SFO
