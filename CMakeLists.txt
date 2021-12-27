@@ -232,8 +232,22 @@ endif()
 # Add static libs
 set(CORELIBS ${CORELIBS} ${STATIC_LIBRARY_FLAGS})
 
+# Set PSP libraries
 if(PSP)
-set(CORELIBS ${CORELIBS} ${STATIC_LIBRARY_FLAGS})
+set(CORELIBS
+    SDL2main
+    ${CORELIBS}
+    GL
+    pspvram
+    pspvfpu
+    pspgu
+    pspge
+    pspctrl
+    pspdisplay
+    pspaudio
+    psphprm
+    psprtc
+)
 endif()
 
 # Link options for main binary
@@ -263,6 +277,16 @@ endif()
 
 # Packaging
 add_subdirectory(packaging)
+
+# Create EBOOT.PBP for PSP version
+create_pbp_file(
+    TARGET openomf
+    ICON_PATH NULL
+    BACKGROUND_PATH NULL
+    PREVIEW_PATH NULL
+    TITLE OpenOMF
+    BUILD_PRX
+)
 
 # Installation
 install(TARGETS openomf
