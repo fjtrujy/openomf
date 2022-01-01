@@ -104,8 +104,8 @@ int pm_init() {
             } else if(!strcasecmp(SDL_GetPlatform(), "PlayStation Portable")) {
                 // on OSX, GetBasePath returns the 'Resources' directory
                 // if run from an app bundle, so we can use this as-is
-                local_path_build(RESOURCE_PATH, bin_base_dir, "openomfproject/openomf/resources/");
-                local_path_build(PLUGIN_PATH, bin_base_dir, "openomfproject/openomf/plugins/");
+                local_path_build(RESOURCE_PATH, bin_base_dir, "resources/");
+                local_path_build(PLUGIN_PATH, bin_base_dir, "plugins/");
                 m_ok = 1;
             }
             // any other platform will look in ./resources
