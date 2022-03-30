@@ -12,6 +12,7 @@ multiple platforms (Linux, Mac OSX, Windows, BSD to name a few).
 
 For mode detailed information about the project, please see [http://www.openomf.org/](http://www.openomf.org).
 
+
 Installation
 ------------
 For installing & compiling, please see [INSTALL.md](https://github.com/omf2097/openomf/blob/master/INSTALL.md).
