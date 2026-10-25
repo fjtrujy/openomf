@@ -273,7 +273,12 @@ static bool play_pcm_sound(void *userdata, const int channel, const sound_source
     const int pan_left = (panning > 0) ? (100 - panning) * 255 / 100 : 255;
     const int pan_right = (panning < 0) ? (100 + panning) * 255 / 100 : 255;
 
-    free_chunk(ctx, channel); // Drop any previous chunk on this channel.
+    // The mixer may still be reading the previous chunk on its audio thread.
+    // Never release or replace the PCM before SDL_mixer has stopped using it.
+    // Mix_FadeInChannelTimed also replaces the channel, but doing so *after*
+    // free_chunk would leave a short use-after-free window.
+    Mix_HaltChannel(channel);
+    free_chunk(ctx, channel);
 #ifdef __PSP__
     if(!psp_pcm_cache_get(ctx, &ctx->chunks[channel], src->buf, src->len, src->freq, volume)) {
         if(!audio_get_chunk(ctx, &ctx->chunks[channel], src->buf, src->len, src->freq, volume)) {
@@ -338,9 +343,11 @@ static void set_channel_panning(void *userdata, const int channel, const int pan
 static void stop_music(void *userdata) {
     assert(userdata);
     sdl_audio_context *const ctx = userdata;
+    // The audio callback may still read ctx->music. Removing the hook first
+    // synchronizes with the mixer before the underlying music source is freed.
+    Mix_HookMusic(NULL, NULL);
     Mix_HaltMusic();
     music_source_close(&ctx->music);
-    Mix_HookMusic(NULL, NULL);
 }
 
 static void sdl_hook(void *userdata, Uint8 *stream, const int len) {

@@ -121,7 +121,11 @@ static void create(renderer *r) {
     // Large command and palette storage belongs on the heap rather than the PSP stack.
     // GU command lists and CLUT arrays require 16-byte alignment on hardware.
     gu_context *ctx = memalign(16, sizeof(gu_context));
-    if(ctx) memset(ctx, 0, sizeof(*ctx));
+    if(ctx) {
+        memset(ctx, 0, sizeof(*ctx));
+    } else {
+        log_error("PSP GU: out of memory creating renderer context");
+    }
     r->ctx = ctx;
 }
 
@@ -136,6 +140,7 @@ static void clear_textures(gu_context *ctx) {
 
 static void destroy(renderer *r) {
     gu_context *ctx = r->ctx;
+    if(!ctx) return;
     clear_textures(ctx);
     free(ctx->cpu_frame);
     free(ctx->rgba_frame);
@@ -160,6 +165,7 @@ static bool setup(void *userdata, int w, int h, bool fullscreen, bool vsync, int
                   int fb_scale, int scaling_mode) {
     (void)w; (void)h; (void)fullscreen; (void)scaling_mode;
     gu_context *ctx = userdata;
+    if(!ctx) return false;
     ctx->screen_w = SCREEN_W;
     ctx->screen_h = SCREEN_H;
     ctx->fullscreen = true;

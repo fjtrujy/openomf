@@ -196,8 +196,15 @@ void object_dynamic_tick_advance(object *obj) {
 
     if(obj->attached_to_id != 0) {
         object *attached_to = game_state_find_object(obj->gs, obj->attached_to_id);
-        object_set_pos(obj, object_get_pos(attached_to));
-        object_set_direction(obj, object_get_direction(attached_to));
+        if(attached_to != NULL) {
+            object_set_pos(obj, object_get_pos(attached_to));
+            object_set_direction(obj, object_get_direction(attached_to));
+        } else {
+            // The owner can disappear during a round/scene transition while
+            // its attached effect is still finishing. Keep the effect at its
+            // last position rather than dereferencing the missing owner.
+            obj->attached_to_id = 0;
+        }
     }
 
     // Check if object still needs to be halted
