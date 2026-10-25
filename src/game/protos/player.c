@@ -696,17 +696,41 @@ void player_run_apply(object *obj) {
 
         // If UA is set, force other HAR to damage animation
         if(script_is_tag_set_by_id(frame, TAG_UA) && enemy) {
-            har *h = object_get_userdata(obj);
-            if(enemy->cur_animation->id != ANIM_DAMAGE) {
-                har *eh = object_get_userdata(enemy);
-                object_set_animation(enemy, &af_get_move(eh->af_data, ANIM_DAMAGE)->ani);
-                eh->state = STATE_RECOIL;
+            // UA is used by projectile animations as well as HAR animations.
+            // Their userdata layouts differ: casting a projectile to har
+            // reads an unrelated field instead of the owning AF file.
+            const af *source_af = NULL;
+            if(obj->group == GROUP_HAR) {
+                const har *h = object_get_userdata(obj);
+                if(h) source_af = h->af_data;
+            } else if(obj->group == GROUP_PROJECTILE && object_get_userdata(obj)) {
+                source_af = projectile_get_af_data(obj);
+#ifdef PSP_STRESS_DEMO
+                static bool reported_projectile_ua;
+                if(!reported_projectile_ua) {
+                    reported_projectile_ua = true;
+                    log_info("PSP STRESS: UA projectile animation=%d source AF=%p",
+                             obj->cur_animation ? obj->cur_animation->id : -1, (const void *)source_af);
+                }
+#endif
             }
-            af_move *move = af_get_move(h->af_data, obj->cur_animation->id);
-            object_set_custom_string(enemy, str_c(&move->footer_string));
-            object_set_repeat(enemy, 0);
-            object_set_stride(enemy, 1);
-            script_reader_seek(&enemy->animation_state.reader, script_reader_tick(&obj->animation_state.reader));
+
+            har *eh = enemy->group == GROUP_HAR ? object_get_userdata(enemy) : NULL;
+            af_move *move = source_af && obj->cur_animation ? af_get_move(source_af, obj->cur_animation->id) : NULL;
+            af_move *damage = eh && eh->af_data ? af_get_move(eh->af_data, ANIM_DAMAGE) : NULL;
+            if(move && damage) {
+                if(enemy->cur_animation == NULL || enemy->cur_animation->id != ANIM_DAMAGE) {
+                    object_set_animation(enemy, &damage->ani);
+                    eh->state = STATE_RECOIL;
+                }
+                object_set_custom_string(enemy, str_c(&move->footer_string));
+                object_set_repeat(enemy, 0);
+                object_set_stride(enemy, 1);
+                script_reader_seek(&enemy->animation_state.reader, script_reader_tick(&obj->animation_state.reader));
+            } else {
+                log_warn("Skipping UA for unsupported or missing animation data (source group=%u, enemy group=%u)",
+                         obj->group, enemy->group);
+            }
         }
 
         // handle scaling on the Y axis

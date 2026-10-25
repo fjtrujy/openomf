@@ -387,9 +387,12 @@ bool forgetful(const ai *a) {
  */
 int get_enemy_range(const controller *ctrl) {
     object *o = game_state_find_object(ctrl->gs, ctrl->har_obj_id);
+    if(!o) return RANGE_FAR;
     har *h = object_get_userdata(o);
+    if(!h) return RANGE_FAR;
     object *o_enemy =
         game_state_find_object(ctrl->gs, game_state_get_player(ctrl->gs, h->player_id == 1 ? 0 : 1)->har_obj_id);
+    if(!o_enemy) return RANGE_FAR;
 
     int range_units = fabsf(o_enemy->pos.x - o->pos.x) / 30;
     switch(range_units) {
@@ -408,11 +411,15 @@ int get_enemy_range(const controller *ctrl) {
 
 bool enemy_is_stunned_or_stasis(const controller *ctrl) {
     object *o = game_state_find_object(ctrl->gs, ctrl->har_obj_id);
+    if(!o) return false;
     har *h = object_get_userdata(o);
+    if(!h) return false;
     object *o_enemy =
         game_state_find_object(ctrl->gs, game_state_get_player(ctrl->gs, h->player_id == 1 ? 0 : 1)->har_obj_id);
 
+    if(!o_enemy) return false;
     har *h_enemy = object_get_userdata(o_enemy);
+    if(!h_enemy) return false;
 
     return h_enemy->state == STATE_STUNNED || h_enemy->in_stasis_ticks;
 }
@@ -1621,10 +1628,14 @@ bool assign_move_by_id(controller *ctrl, int move_id) {
 int ai_block_har(controller *ctrl, ctrl_event **ev) {
     ai *a = ctrl->data;
     object *o = game_state_find_object(ctrl->gs, ctrl->har_obj_id);
+    if(!o) return 0;
     har *h = object_get_userdata(o);
+    if(!h) return 0;
     object *o_enemy =
         game_state_find_object(ctrl->gs, game_state_get_player(ctrl->gs, h->player_id == 1 ? 0 : 1)->har_obj_id);
+    if(!o_enemy) return 0;
     har *h_enemy = object_get_userdata(o_enemy);
+    if(!h_enemy) return 0;
 
     // XXX TODO get maximum move distance from the animation object
     if(fabsf(o_enemy->pos.x - o->pos.x) < 100 && h_enemy->executing_move && smart_usually(a)) {
@@ -1651,6 +1662,7 @@ int ai_block_har(controller *ctrl, ctrl_event **ev) {
 int ai_block_projectile(controller *ctrl, ctrl_event **ev) {
     ai *a = ctrl->data;
     object *o = game_state_find_object(ctrl->gs, ctrl->har_obj_id);
+    if(!o) return 0;
 
     bool remember_shooting = (learning_moment(a) && a->shot >= MAX_TIMES_SHOT);
 
@@ -1662,7 +1674,7 @@ int ai_block_projectile(controller *ctrl, ctrl_event **ev) {
         if(projectile_get_owner(o_prj) == har_player_id(o)) {
             continue;
         }
-        if(o_prj->cur_sprite_id >= 0 && (smart_usually(a) || remember_shooting)) {
+        if(o_prj->cur_animation && o_prj->cur_sprite_id >= 0 && (smart_usually(a) || remember_shooting)) {
             sprite *cur_sprite = animation_get_sprite(o_prj->cur_animation, o_prj->cur_sprite_id);
             if(cur_sprite) {
                 vec2i pos_prj = vec2i_add(object_get_pos(o_prj), cur_sprite->pos);
@@ -1722,7 +1734,9 @@ void process_selected_move(controller *ctrl, ctrl_event **ev) {
 void handle_movement(controller *ctrl, ctrl_event **ev) {
     ai *a = ctrl->data;
     object *o = game_state_find_object(ctrl->gs, ctrl->har_obj_id);
+    if(!o) return;
     har *h = object_get_userdata(o);
+    if(!h) return;
 
     // default mid-action jump chance
     int jump_chance = 100;
@@ -2636,6 +2650,7 @@ int ai_controller_poll(controller *ctrl, ctrl_event **ev) {
     }
 
     har *h = object_get_userdata(o);
+    if(!h) return 0;
 
     // Do not run AI while the game is paused
     if(game_state_is_paused(o->gs)) {
@@ -2688,7 +2703,8 @@ int ai_controller_poll(controller *ctrl, ctrl_event **ev) {
     if(o) {
         object *enemy = game_state_find_object(ctrl->gs, o->animation_state.enemy_obj_id);
         // UJ tag signals to the AI it should probably jump
-        if(can_move && can_interupt_tactic && player_frame_isset(enemy, TAG_UJ) && smart_sometimes(a)) {
+        if(enemy && can_move && can_interupt_tactic && player_frame_isset(enemy, TAG_UJ) &&
+           smart_sometimes(a)) {
             reset_tactic_state(a);
             controller_cmd(ctrl, ACT_UP, ev);
             controller_cmd(ctrl, ACT_STOP, ev);

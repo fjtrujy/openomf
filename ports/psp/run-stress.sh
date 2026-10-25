@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build, run and evaluate one 120-second AI-vs-AI PSP arena in PPSSPP.
-# Usage: ports/psp/run-stress.sh [arena:0-4] [safe-jit|interpreter|default-jit]
+# Usage: ports/psp/run-stress.sh [arena:0-4] [safe-jit|jit-ir|no-pointer-cache|strict-fast-jit|interpreter|default-jit]
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -30,10 +30,21 @@ case "$mode" in
     safe-jit)
         args=(-j --appendconfig="$root/ports/psp/ppsspp-no-fastmem.ini")
         ;;
+    strict-fast-jit)
+        args=(-j --appendconfig="$root/ports/psp/ppsspp-fastmem-strict.ini")
+        ;;
+    jit-ir)
+        # PPSSPP 1.20.x: IR-based ARM64 JIT, fast memory with strict bad-access handling.
+        args=(-J --appendconfig="$root/ports/psp/ppsspp-fastmem-strict.ini")
+        ;;
+    no-pointer-cache)
+        # Classic JIT: keep fast memory but disable the ARM64 cached-pointer load/store path.
+        args=(-j --appendconfig="$root/ports/psp/ppsspp-no-pointer-cache.ini")
+        ;;
     interpreter) args=(-i) ;;
     default-jit) args=(-j) ;;
     *)
-        echo "Mode must be safe-jit, interpreter or default-jit" >&2
+        echo "Mode must be safe-jit, jit-ir, no-pointer-cache, strict-fast-jit, interpreter or default-jit" >&2
         exit 2
         ;;
 esac
@@ -59,6 +70,9 @@ cp "$build/EBOOT.PBP" "$game/EBOOT.PBP"
 log="$game/save/openomf.log"
 report="$build/ppsspp-$mode.log"
 rm -f "$log"
+# PPSSPP's --log option appends; isolate each test so stale emulator errors
+# cannot contaminate the current run's diagnostics.
+: > "$report"
 
 echo "Running arena $arena ($mode) with $ppsspp"
 "$ppsspp" "${args[@]}" --windowed --log="$report" "$game/EBOOT.PBP" \
@@ -99,6 +113,10 @@ if ! grep -q 'Engine deinit successful' "$log"; then
 fi
 if grep -Eq 'PSP GU texture cache exhausted|PSP GU draw command capacity exceeded' "$log"; then
     echo "FAIL: renderer dropped a draw command; see $log" >&2
+    exit 1
+fi
+if grep -q 'BADF=sceIoRead(0,' "$report"; then
+    echo "FAIL: PSP attempted to read nonexistent stdin; see $report" >&2
     exit 1
 fi
 

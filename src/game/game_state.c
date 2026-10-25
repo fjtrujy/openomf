@@ -1486,8 +1486,12 @@ int game_state_clone(game_state *src, game_state *dst) {
 }
 
 bool game_state_hars_are_alive(game_state *gs) {
-    har *h1 = object_get_userdata(game_state_find_object(gs, game_state_get_player(gs, 0)->har_obj_id));
-    har *h2 = object_get_userdata(game_state_find_object(gs, game_state_get_player(gs, 1)->har_obj_id));
+    object *o1 = game_state_find_object(gs, game_state_get_player(gs, 0)->har_obj_id);
+    object *o2 = game_state_find_object(gs, game_state_get_player(gs, 1)->har_obj_id);
+    if(!o1 || !o2) return false;
+    har *h1 = object_get_userdata(o1);
+    har *h2 = object_get_userdata(o2);
+    if(!h1 || !h2) return false;
     return (h1->health > 0) && (h2->health > 0);
 }
 

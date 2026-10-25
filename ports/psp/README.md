@@ -97,7 +97,8 @@ repeatable test runner (requires an installed PPSSPP and a previously staged
 ```sh
 export PSPDEV=/path/to/pspdev
 ports/psp/run-stress.sh 2 safe-jit
-# Other modes: interpreter, default-jit (known to crash intermittently)
+# Diagnostic modes: no-pointer-cache, jit-ir, strict-fast-jit,
+# interpreter, default-jit
 ```
 
 The runner reports frame-window statistics, checks that the engine shuts
@@ -140,6 +141,38 @@ as failures. It keeps emulator output under `build/psp-stress-arenaN/`.
   59.3 FPS average, 54.9 FPS minimum (including arena loading)**,
   734 PCM-cache hits, 34 misses, and 3.3 MiB cached. Neither the GPU
   texture cache nor the draw-command queue reported an overflow.
+* With additional AI guards for absent opponents and missing HAR userdata,
+  **Arena 2 completed two 120-second default-JIT runs** and one
+  `strict-fast-jit` run, which disables bad-memory ignoring while preserving
+  fast memory access. The strict run averaged 58.2 FPS with a 50.1 FPS
+  minimum five-second window, including transitions/loading.
+* **This does not resolve the JIT crash:** two `strict-fast-jit` Arena 4 runs
+  faulted on macOS at `0x30000002c`, after about 5–25 seconds. This is the
+  same near-null emulated address as the earlier failures. There is no
+  verified offending PSP instruction yet.
+* The engine's debug console used to call `read(0,...)` every tick, causing
+  repeated `BADF=sceIoRead(0,...)` errors in PPSSPP. Its stdin polling is now
+  disabled on PSP only. The emulator's invalid-stdin errors disappeared,
+  but the same JIT crash occurred afterward, so the stdin issue was **not**
+  the root cause of the crash.
+* With the completed hardening changes, `run-stress.sh 2 safe-jit` and
+  `run-stress.sh 4 safe-jit` each completed 120 seconds with natural scene
+  transitions, clean shutdown and zero invalid-stdin calls. Arena 2 averaged
+  **59.2 FPS** over 23 windows (minimum 52.9); Arena 4 averaged **59.2 FPS**
+  (minimum 53.7). Both minimums include scene-loading intervals. This is
+  emulator testing only; physical PSP performance is unverified.
+* Further ARM64 PPSSPP 1.20.4 isolation tests narrowed the intermittent
+  fast-memory crash to the classic JIT's optimized load/store handling.
+  Disabling only cached guest-to-host pointers
+  (`JitDisableFlags=0x01000000`) completed **two full Arena 4 stress tests**
+  and **one full Arena 2 stress test**, without disabling fast memory.
+  The independent IR JIT (`-J`) also passed
+  two full Arena 4 tests with fast memory ON, whereas the classic JIT's
+  register-flush mode still crashed at the original host fault address.
+  The PPSSPP WebSocket debugger captured candidate guest memory breakpoints,
+  but both reported addresses conflicted with the paused register snapshots.
+  The exact faulty guest/native instruction has **not** been proven.
+  See [PPSSPP ARM64 JIT crash investigation](PPSSPP_ARM64_JIT_CRASH.md).
 
 ### PPSSPP JIT crash workaround (macOS)
 
@@ -157,6 +190,27 @@ This disables PPSSPP's aggressive fast guest-memory path for the session
 also completed testing. A guest null-pointer bug remains a possibility, so
 the underlying crash and real-PSP behavior still need investigation.
 
+For a **narrower emulator workaround** that keeps classic JIT and fast
+memory enabled while disabling the suspected cached-pointer optimization:
+
+```sh
+ports/psp/run-stress.sh 4 no-pointer-cache
+```
+
+It uses `ports/psp/ppsspp-no-pointer-cache.ini`. Alternatively,
+`ports/psp/run-stress.sh 4 jit-ir` tests PPSSPP's independent IR-based JIT
+with fast memory enabled. These are testing configurations, not changes to
+the PSP EBOOT or proof of long-term physical-hardware stability.
+
+For crash diagnosis, `run-stress.sh 2 strict-fast-jit` uses the bundled
+`ppsspp-fastmem-strict.ini`, which enables fast memory but disables ignoring
+bad reads. This mode is **not a recommended workaround**: Arena 4 still
+reproduces the host crash. Attempts to attach LLDB to PPSSPP were denied by
+macOS debugserver permissions; recovering the PSP guest PC requires a
+debugger-enabled environment or native PSPLink exception trace. The test
+runner resets emulator logs before each run and rejects new invalid stdin
+reads on PSP.
+
 These are PPSSPP observations on a macOS host, **not a physical PSP FPS claim**.
 The stress harness compiles instrumentation exclusively in `PSP_STRESS_DEMO`
 builds and should never be shipped to users.
@@ -165,12 +219,11 @@ builds and should never be shipped to users.
 
 * Verify complete five-arena playthroughs and sound quality/sync on a physical
   PSP, including PSP-1000 memory restrictions if that console is targeted.
-* Investigate the intermittent macOS PPSSPP fast-memory JIT crashes seen
-  during Arena 2 gameplay; distinguish a JIT translation bug from a genuine
-  guest near-null dereference before calling all arenas crash-free. One
-  120-second default-JIT regression run passed after the new sound-channel
-  and orphan-object guards, but a second run still crashed; do not treat
-  these guards as a confirmed fix for the JIT issue.
+* Investigate the intermittent macOS PPSSPP fast-memory classic JIT crashes:
+  identify the precise native load/store or pointer-cache lifetime error
+  with a debugger-enabled PPSSPP. The crash persisted after AI guards and
+  the PSP stdin fix, but has not reproduced during the tested runs with the
+  cached-pointer optimization disabled. See the investigation report.
 * Quantify long-term texture/PCM cache churn, dropped allocations and rare
   CPU-effect fallbacks under special moves and credits.
 * Compare visual results against desktop OpenGL screenshots, particularly
