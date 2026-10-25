@@ -90,6 +90,20 @@ It will exit after 120 seconds. Any natural arena transition (e.g. a
 victory screen) uses the original game logic; the harness must never replace
 controllers or pilots during an active scene.
 
+To build, launch and evaluate an arena in a single command, use the
+repeatable test runner (requires an installed PPSSPP and a previously staged
+`build/psp/PSP/GAME/OpenOMF/resources` directory):
+
+```sh
+export PSPDEV=/path/to/pspdev
+ports/psp/run-stress.sh 2 safe-jit
+# Other modes: interpreter, default-jit (known to crash intermittently)
+```
+
+The runner reports frame-window statistics, checks that the engine shuts
+down successfully, and treats dropped GU draw commands or emulator crashes
+as failures. It keeps emulator output under `build/psp-stress-arenaN/`.
+
 ### PPSSPP results (October 25, 2026)
 
 * The initial SDL software renderer started OpenOMF, but full combat was
@@ -110,15 +124,22 @@ controllers or pilots during an active scene.
   sound-conversion stalls. Entering/loading a new arena still took about
   370–430 ms in individual frames, so loading transitions are not yet
   entirely smooth.
-* An additional Arena 2 test held 59.3–60 FPS during combat, but **two runs
-  with PPSSPP v1.20.4's default JIT + fast memory access crashed the host
-  emulator** at different times (roughly 55 and 90 seconds). Both macOS
+* An additional Arena 2 test held 59.3–60 FPS during combat, but **multiple
+  runs with PPSSPP v1.20.4's default JIT + fast memory access crashed the host
+  emulator** at different times (including 55, 70 and 90 seconds). macOS
   reports show a near-null guest memory access at `0x30000002c`. The trigger
   is not yet identified, so these failures cannot simply be dismissed.
 * **Two alternative PPSSPP CPU configurations completed Arena 2's full
   120-second test with natural scene transitions and no crash**: interpreter
   mode (`-i`) and JIT with `FastMemoryAccess=False` (diagnostic override).
   The latter reported 242 PCM cache hits, 33 misses and 3.9 MiB cached.
+  Another complete 120-second run used `IgnoreBadMemAccess=False` as well as
+  `FastMemoryAccess=False` and reported no invalid guest memory accesses.
+* The automated `run-stress.sh 4 safe-jit` regression completed all 120
+  seconds with natural scene transitions: **23 five-second FPS windows,
+  59.3 FPS average, 54.9 FPS minimum (including arena loading)**,
+  734 PCM-cache hits, 34 misses, and 3.3 MiB cached. Neither the GPU
+  texture cache nor the draw-command queue reported an overflow.
 
 ### PPSSPP JIT crash workaround (macOS)
 
@@ -130,7 +151,8 @@ Use the bundled configuration override with JIT while testing OpenOMF:
   --windowed "$HOME/.config/ppsspp/PSP/GAME/OpenOMF/EBOOT.PBP"
 ```
 
-This disables PPSSPP's aggressive fast guest-memory path for the session and
+This disables PPSSPP's aggressive fast guest-memory path for the session
+**without hiding invalid memory accesses**, and
 **does not edit your global PPSSPP settings**. The fallback `-i` interpreter
 also completed testing. A guest null-pointer bug remains a possibility, so
 the underlying crash and real-PSP behavior still need investigation.
@@ -143,9 +165,12 @@ builds and should never be shipped to users.
 
 * Verify complete five-arena playthroughs and sound quality/sync on a physical
   PSP, including PSP-1000 memory restrictions if that console is targeted.
-* Investigate the two reproducible macOS PPSSPP fast-memory JIT crashes seen
+* Investigate the intermittent macOS PPSSPP fast-memory JIT crashes seen
   during Arena 2 gameplay; distinguish a JIT translation bug from a genuine
-  guest near-null dereference before calling all arenas crash-free.
+  guest near-null dereference before calling all arenas crash-free. One
+  120-second default-JIT regression run passed after the new sound-channel
+  and orphan-object guards, but a second run still crashed; do not treat
+  these guards as a confirmed fix for the JIT issue.
 * Quantify long-term texture/PCM cache churn, dropped allocations and rare
   CPU-effect fallbacks under special moves and credits.
 * Compare visual results against desktop OpenGL screenshots, particularly
