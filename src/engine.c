@@ -6,6 +6,7 @@
 #include "formats/rec.h"
 #include "game/game_player.h"
 #include "game/game_state.h"
+#include "game/common_defines.h"
 #include "game/gui/osd/osd.h"
 #include "game/utils/settings.h"
 #include "resources/languages.h"
@@ -189,11 +190,47 @@ void engine_run(const engine_init_flags *init_flags) {
 
     joystick_init();
 
+#ifdef PSP_STRESS_DEMO
+    // Headless-input stress mode for repeatable in-arena renderer validation.
+    // This bypasses menus, not gameplay: both combatants use the ordinary AI
+    // controllers and the normal arena engine, audio and rendering pipelines.
+    game_state_init_demo(gs);
+    game_state_set_next(gs, SCENE_ARENA0 + PSP_STRESS_ARENA);
+    log_info("PSP STRESS: queued AI-vs-AI arena %u for 120s sustained match",
+             (unsigned)PSP_STRESS_ARENA);
+    uint64_t stress_started = SDL_GetTicks64();
+    uint64_t stress_last_report = stress_started;
+    uint64_t stress_frames = 0;
+#endif
+
     // Game loop
     uint64_t frame_start = SDL_GetTicks64(); // Set game tick timer
     int dynamic_wait = 0;
     int static_wait = 0;
     while(run && game_state_is_running(gs)) {
+#ifdef PSP_STRESS_DEMO
+        const uint64_t stress_frame_begin = SDL_GetTicks64();
+#endif
+#ifdef PSP_STRESS_DEMO
+        const uint64_t stress_now = SDL_GetTicks64();
+        const uint64_t stress_elapsed = stress_now - stress_started;
+        // Never replace live controllers/pilots during an active arena:
+        // the scene owns references to them until teardown. Test one arena
+        // per run; repeat runs with PSP_STRESS_ARENA=0..4.
+        if(stress_now - stress_last_report >= 5000) {
+            const uint64_t delta = stress_now - stress_last_report;
+            const double fps = (double)stress_frames * 1000.0 / (double)delta;
+            log_info("PSP STRESS: scene=%u elapsed=%llus FPS=%.1f samples=%llu",
+                     gs->this_id, (unsigned long long)(stress_elapsed / 1000), fps,
+                     (unsigned long long)stress_frames);
+            stress_last_report = stress_now;
+            stress_frames = 0;
+        }
+        if(stress_elapsed >= 120000) {
+            log_info("PSP STRESS: completed 120s run; exiting cleanly");
+            break;
+        }
+#endif
         // Handle events
         bool check_fs;
         while(SDL_PollEvent(&e)) {
@@ -393,15 +430,32 @@ void engine_run(const engine_init_flags *init_flags) {
         } while(tick_limit-- && (has_dynamic || has_static));
 
         // Do the actual video rendering jobs
+#ifdef PSP_STRESS_DEMO
+        const uint64_t stress_before_render = SDL_GetTicks64();
+#endif
         if(enable_screen_updates) {
             video_render_prepare(game_state_get_framebuffer_options(gs));
             game_state_render(gs);
+#ifdef PSP_STRESS_DEMO
+            const uint64_t stress_before_finish = SDL_GetTicks64();
+#endif
             if(debugger_render) {
                 game_state_debug(gs);
             }
             osd_render();
             console_render();
             video_render_finish();
+#ifdef PSP_STRESS_DEMO
+            const uint64_t stress_after_finish = SDL_GetTicks64();
+            if(stress_after_finish - stress_frame_begin > 120) {
+                log_warn("PSP STRESS slow frame: scene=%u update=%llums draw=%llums finish=%llums",
+                         gs->this_id,
+                         (unsigned long long)(stress_before_render - stress_frame_begin),
+                         (unsigned long long)(stress_before_finish - stress_before_render),
+                         (unsigned long long)(stress_after_finish - stress_before_finish));
+            }
+            stress_frames++;
+#endif
         } else {
             // If screen updates are disabled, then wait
             SDL_Delay(1);

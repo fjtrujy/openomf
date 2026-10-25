@@ -118,9 +118,15 @@ const field f_advanced[] = {
 
 const field f_keyboard[] = {
     // Player one
+#ifdef __PSP__
+    F_INT(settings_keyboard, ctrl_type1, CTRL_TYPE_GAMEPAD),
+    F_STRING(settings_keyboard, joy_name1, "PSP builtin joypad"),
+    F_INT(settings_keyboard, joy_offset1, 0),
+#else
     F_INT(settings_keyboard, ctrl_type1, CTRL_TYPE_KEYBOARD),
     F_STRING(settings_keyboard, joy_name1, "None"),
     F_INT(settings_keyboard, joy_offset1, -1),
+#endif
     F_STRING(settings_keyboard, key1_jump_up, "Up"),
     F_STRING(settings_keyboard, key1_jump_right, "PageUp"),
     F_STRING(settings_keyboard, key1_walk_right, "Right"),

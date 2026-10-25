@@ -174,6 +174,21 @@ ok:
 }
 
 bool resource_path_init(void) {
+#ifdef __PSP__
+    // The PSP's ms0:/ device path cannot reliably be canonicalized by realpath().
+    // Ship EBOOT.PBP and resources/ together in the same game directory.
+    char *base = SDL_GetBasePath();
+    if(!base) {
+        log_error("Unable to find PSP EBOOT directory: %s", SDL_GetError());
+        return false;
+    }
+    path_from_parts(&resource_dir, base);
+    path_from_parts(&config_dir, base, "save");
+    path_from_parts(&state_dir, base, "save");
+    SDL_free(base);
+    log_info("PSP resource path = %s", path_c(&resource_dir));
+    return true;
+#else
     if(!find_writeable_path(&state_dir, OPENOMF_STATE_PATH, XDG_STATE_HOME)) {
         log_error("Unable to find state path!");
         return false;
@@ -190,6 +205,7 @@ bool resource_path_init(void) {
     log_info("State path = %s", path_c(&state_dir));
     log_info("Resource path = %s", path_c(&resource_dir));
     return true;
+#endif
 }
 
 void resource_path_create_dirs(void) {

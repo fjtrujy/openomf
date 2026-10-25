@@ -12,6 +12,21 @@
 #include <SDL.h>
 #include <SDL_mixer.h>
 
+#ifdef __PSP__
+// PSP SDL_ConvertAudio is expensive, especially when several effects start
+// within a single 16ms frame. Sound DAT samples are stable borrowed buffers,
+// so keep the 48kHz stereo conversion for reuse instead of recomputing it.
+#define PSP_PCM_CACHE_MAX_BYTES (4u * 1024u * 1024u)
+#define PSP_PCM_CACHE_MAX_ENTRIES 256
+typedef struct {
+    const char *source;
+    size_t source_len;
+    int source_freq;
+    Uint8 *pcm;
+    Uint32 pcm_len;
+} psp_pcm_cache_entry;
+#endif
+
 static_assert(SDL_MIXER_VERSION_ATLEAST(2, 0, 4), "SDL_mixer version should be 2.0.4 or later");
 
 static const audio_sample_rate supported_sample_rates[] = {
@@ -30,6 +45,13 @@ typedef struct sdl_audio_context {
     float volume;
     music_source music;
     Mix_Chunk chunks[SOUND_CHANNEL_COUNT]; // Per-channel converted-sample buffers.
+#ifdef __PSP__
+    psp_pcm_cache_entry pcm_cache[PSP_PCM_CACHE_MAX_ENTRIES];
+    unsigned cached_count;
+    size_t cached_bytes;
+    unsigned cache_hits;
+    unsigned cache_misses;
+#endif
 } sdl_audio_context;
 
 static bool is_available(void) {
@@ -87,12 +109,96 @@ static inline void free_chunk(sdl_audio_context *ctx, const int i) {
     Mix_Chunk *chunk = &ctx->chunks[i];
     if(chunk->allocated) {
         SDL_free(chunk->abuf);
-        chunk->allocated = 0;
     }
+    chunk->abuf = NULL;
+    chunk->alen = 0;
+    chunk->allocated = 0;
 }
+
+#ifdef __PSP__
+// SDL_BuildAudioCVT+SDL_ConvertAudio was taking up to ~140 ms for cold sound
+// effects in PPSSPP, causing entire gameplay frames to stall. The only input
+// format provided by SOUNDS.DAT is unsigned 8-bit mono. Resample directly to
+// the S16 output format with fixed-point linear interpolation. This also
+// handles runtime pitch changes (src_freq differs for pitched playback).
+static bool psp_convert_pcm(const sdl_audio_context *ctx, Mix_Chunk *chunk,
+                            const char *src_buf, const size_t src_len,
+                            int src_freq, int volume) {
+    if(ctx->format != AUDIO_S16SYS || (ctx->channels != 1 && ctx->channels != 2) ||
+       ctx->sample_rate <= 0 || src_freq <= 0 || src_len == 0) {
+        return false;
+    }
+    const uint64_t samples64 = ((uint64_t)src_len * (unsigned)ctx->sample_rate) / (unsigned)src_freq;
+    if(samples64 == 0 || samples64 > (UINT32_MAX / ((unsigned)ctx->channels * sizeof(int16_t)))) {
+        return false;
+    }
+    const size_t samples = (size_t)samples64;
+    const size_t size = samples * (size_t)ctx->channels * sizeof(int16_t);
+    int16_t *buffer = SDL_malloc(size);
+    if(!buffer) return false;
+
+    const uint8_t *input = (const uint8_t *)src_buf;
+    const uint64_t increment = ((uint64_t)(unsigned)src_freq << 32) / (unsigned)ctx->sample_rate;
+    uint64_t phase = 0;
+    for(size_t i = 0; i < samples; i++, phase += increment) {
+        size_t idx = (size_t)(phase >> 32);
+        if(idx >= src_len) idx = src_len - 1;
+        const size_t next = idx + 1 < src_len ? idx + 1 : idx;
+        const int a = (int)input[idx] - 128;
+        const int b = (int)input[next] - 128;
+        const unsigned fraction = (unsigned)(phase >> 16) & 0xffffu;
+        const int16_t sample = (int16_t)(a * 256 + ((b - a) * (int)fraction) / 256);
+        for(int channel = 0; channel < ctx->channels; channel++) {
+            buffer[i * (size_t)ctx->channels + (size_t)channel] = sample;
+        }
+    }
+    chunk->allocated = 1;
+    chunk->abuf = (Uint8 *)buffer;
+    chunk->alen = (Uint32)size;
+    chunk->volume = volume;
+    return true;
+}
+#endif
+
+#ifdef __PSP__
+static bool psp_pcm_cache_get(sdl_audio_context *ctx, Mix_Chunk *chunk, const char *source,
+                              size_t source_len, int source_freq, int volume) {
+    for(unsigned i = 0; i < ctx->cached_count; i++) {
+        const psp_pcm_cache_entry *item = &ctx->pcm_cache[i];
+        if(item->source == source && item->source_len == source_len &&
+           item->source_freq == source_freq) {
+            *chunk = (Mix_Chunk){.allocated = 0, .abuf = item->pcm,
+                                  .alen = item->pcm_len, .volume = volume};
+            ctx->cache_hits++;
+            return true;
+        }
+    }
+    ctx->cache_misses++;
+    return false;
+}
+
+static void psp_pcm_cache_store(sdl_audio_context *ctx, Mix_Chunk *chunk, const char *source,
+                                size_t source_len, int source_freq) {
+    if(ctx->cached_count >= PSP_PCM_CACHE_MAX_ENTRIES ||
+       chunk->alen > PSP_PCM_CACHE_MAX_BYTES - ctx->cached_bytes) {
+        return; // Allow non-cached playback; never sacrifice audio or allocate unboundedly.
+    }
+    psp_pcm_cache_entry *item = &ctx->pcm_cache[ctx->cached_count++];
+    *item = (psp_pcm_cache_entry){.source = source, .source_len = source_len,
+                                  .source_freq = source_freq,
+                                  .pcm = chunk->abuf, .pcm_len = chunk->alen};
+    ctx->cached_bytes += chunk->alen;
+    chunk->allocated = 0; // The cache now owns the PCM; the channel only borrows it.
+}
+#endif
 
 static bool audio_get_chunk(const sdl_audio_context *ctx, Mix_Chunk *chunk, const char *src_buf, const size_t src_len,
                             const int src_freq, const int volume) {
+#ifdef __PSP__
+    if(ctx->format == AUDIO_S16SYS && (ctx->channels == 1 || ctx->channels == 2)) {
+        return psp_convert_pcm(ctx, chunk, src_buf, src_len, src_freq, volume);
+    }
+#endif
     SDL_AudioCVT cvt;
 
     if(SDL_BuildAudioCVT(&cvt, AUDIO_U8, 1, src_freq, ctx->format, ctx->channels, ctx->sample_rate) < 0) {
@@ -168,10 +274,20 @@ static bool play_pcm_sound(void *userdata, const int channel, const sound_source
     const int pan_right = (panning < 0) ? (100 + panning) * 255 / 100 : 255;
 
     free_chunk(ctx, channel); // Drop any previous chunk on this channel.
+#ifdef __PSP__
+    if(!psp_pcm_cache_get(ctx, &ctx->chunks[channel], src->buf, src->len, src->freq, volume)) {
+        if(!audio_get_chunk(ctx, &ctx->chunks[channel], src->buf, src->len, src->freq, volume)) {
+            log_error("Unable to play sound: Failed to convert chunk");
+            return false;
+        }
+        psp_pcm_cache_store(ctx, &ctx->chunks[channel], src->buf, src->len, src->freq);
+    }
+#else
     if(!audio_get_chunk(ctx, &ctx->chunks[channel], src->buf, src->len, src->freq, volume)) {
         log_error("Unable to play sound: Failed to load chunk");
         return false;
     }
+#endif
     Mix_SetPanning(channel, pan_left, pan_right);
     if(Mix_FadeInChannelTimed(channel, &ctx->chunks[channel], 0, fade_in_ms, -1) == -1) {
         log_error("Unable to play sound: %s", Mix_GetError());
@@ -299,6 +415,17 @@ static void close_backend_context(void *userdata) {
     for(int i = 0; i < SOUND_CHANNEL_COUNT; i++) {
         free_chunk(ctx, i);
     }
+#ifdef __PSP__
+    log_info("PSP PCM cache: hits=%u misses=%u entries=%u size=%u KiB",
+             ctx->cache_hits, ctx->cache_misses, ctx->cached_count,
+             (unsigned)(ctx->cached_bytes / 1024));
+    for(unsigned i = 0; i < ctx->cached_count; i++) {
+        SDL_free(ctx->pcm_cache[i].pcm);
+        ctx->pcm_cache[i].pcm = NULL;
+    }
+    ctx->cached_count = 0;
+    ctx->cached_bytes = 0;
+#endif
     Mix_Quit();
     SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }

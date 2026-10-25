@@ -8,6 +8,12 @@
 #ifdef ENABLE_OPENGL3_RENDERER
 #include "video/renderers/opengl3/gl3_renderer.h"
 #endif
+#ifdef ENABLE_PSP_GU_RENDERER
+#include "video/renderers/psp/gu_renderer.h"
+#endif
+#ifdef ENABLE_SOFTWARE_RENDERER
+#include "video/renderers/software/software_renderer.h"
+#endif
 #ifdef ENABLE_NULL_RENDERER
 #include "video/renderers/null/null_renderer.h"
 #endif
@@ -24,8 +30,14 @@ typedef void (*renderer_init)(renderer *renderer);
  * List of all built-in renderers. Most preferred renderers at the top.
  */
 static renderer_init all_renderers[] = {
+#ifdef ENABLE_PSP_GU_RENDERER
+    psp_gu_renderer_set_callbacks,
+#endif
 #ifdef ENABLE_OPENGL3_RENDERER
     gl3_renderer_set_callbacks,
+#endif
+#ifdef ENABLE_SOFTWARE_RENDERER
+    software_renderer_set_callbacks,
 #endif
 #ifdef ENABLE_NULL_RENDERER
     null_renderer_set_callbacks,

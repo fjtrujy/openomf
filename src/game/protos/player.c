@@ -195,6 +195,10 @@ void player_run_advance(object *obj) {
 }
 
 void player_run_apply(object *obj) {
+#ifdef PSP_STRESS_DEMO
+    const uint64_t player_apply_start = SDL_GetTicks64();
+    uint64_t player_audio_cost = 0;
+#endif
     // Some vars for easier life
     player_animation_state *state = &obj->animation_state;
     player_sprite_state *rstate = &obj->sprite_state;
@@ -597,7 +601,13 @@ void player_run_apply(object *obj) {
                 opts.has_panning_sweep = true;
             }
             if(allow_sound_playback) {
+#ifdef PSP_STRESS_DEMO
+                const uint64_t sound_started = SDL_GetTicks64();
+#endif
                 game_state_play_sound(obj->gs, sound_id, &opts);
+#ifdef PSP_STRESS_DEMO
+                player_audio_cost += SDL_GetTicks64() - sound_started;
+#endif
             }
         }
 
@@ -836,6 +846,15 @@ void player_run_apply(object *obj) {
     if(!(script_is_tag_set_by_id(frame, TAG_D) && !state->disable_d)) {
         rstate->timer++;
     }
+#ifdef PSP_STRESS_DEMO
+    const uint64_t player_elapsed = SDL_GetTicks64() - player_apply_start;
+    if(player_elapsed > 40) {
+        log_warn("PSP PLAYER apply cost: obj=%u anim=%d total=%llums sound=%llums entered=%d",
+                 obj->id, obj->cur_animation ? obj->cur_animation->id : -1,
+                 (unsigned long long)player_elapsed, (unsigned long long)player_audio_cost,
+                 (int)state->entered_frame);
+    }
+#endif
 }
 
 void player_run(object *obj) {

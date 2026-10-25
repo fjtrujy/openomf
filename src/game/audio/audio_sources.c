@@ -47,11 +47,12 @@ bool music_source_pick(music_source *src, const resource_id id, const unsigned c
 #endif
 
     str fn;
-    unsigned char *buf;
-    size_t len;
     path music = get_resource_filename(get_resource_file(id));
     // check the modmanager here for a music mod
     path_stem(&music, &fn);
+#ifdef OPUSFILE_FOUND
+    unsigned char *buf;
+    size_t len;
     int music_count = modmanager_count_music(&fn);
     int rand = rand_int(music_count + 1);
     int music_type = settings_get()->sound.music_type;
@@ -65,6 +66,7 @@ bool music_source_pick(music_source *src, const resource_id id, const unsigned c
         str_free(&fn);
         return opus_load_memory(src, (int)channels, (int)sample_rate, buf, len);
     }
+#endif
     str_free(&fn);
     log_debug("Found original music file %s", path_c(&music));
     return psm_load(src, channels, sample_rate, resampler, path_c(&music));
