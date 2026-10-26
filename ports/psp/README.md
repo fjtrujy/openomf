@@ -70,8 +70,9 @@ If using `PSP_NATIVE_INPUT=OFF`, `PSP_NATIVE_TIMING=OFF`,
 `PSP_SDL_AUDIO_FALLBACK=ON`, also set `PSP_STANDALONE=OFF`.
 The standalone target intentionally rejects those incompatible combinations.
 The PSP HOME/exit callback has been observed registering on hardware;
-the user's actual HOME-button confirmation and an XMB Memory Stick
-launch are still outstanding. The callback uses `sceKernelExitGame()`
+manual HOME-button exit confirmation remains outstanding. A user has
+confirmed that the native standalone game launches and runs smoothly from
+the PSP Memory Stick XMB. The callback uses `sceKernelExitGame()`
 as in PSPSDK samples; normal engine exit (rather than an OS-requested
 HOME exit) restores the previous CPU/bus clock.
 
@@ -97,8 +98,8 @@ in the renderer counters; GU is still used to display the final image.
 The legacy SDL-linked PSP configuration builds successfully as well.
 
 These are randomized matches with loading included, not deterministic
-CPU-only benchmarks. The full human-controlled campaign, PSP system
-HOME button and direct XMB launch still require hands-on validation.
+CPU-only benchmarks. The full human-controlled campaign and PSP system
+HOME button still require hands-on validation; direct XMB launch has passed.
 
 #### Platform-neutral shared types validation (October 26, 2026)
 
@@ -138,8 +139,8 @@ with the original `ENGLISH.DAT` in the freeware assets.
 **Physical PSP**: copy it to the Memory Stick, launch from the XMB, and check
 `save/openomf.log`. The native GU renderer has also completed three
 120-second AI-versus-AI combat tests on a real PSP running firmware 6.61
-through PSPLink/HostFS (see results below). The packaged XMB launch and
-full human-controlled campaign still need separate validation.
+through PSPLink/HostFS (see results below). The packaged XMB launch is
+user-confirmed; the full human-controlled campaign remains unverified.
 
 On PSP hardware, `PSP_CLOCK_333=ON` (default) selects the PSP's supported
 333 MHz CPU / 166 MHz bus clock for near-60-FPS combat, restoring the
@@ -219,19 +220,42 @@ the original SDL-window GU renderer in PPSSPP. All measured FPS numbers
 include scene transitions,
 so different randomized fights are not deterministic performance tests.
 
-The physical PSP was exercised through PSPLink/HostFS. A complete
-Memory Stick XMB launch and an independent visual/audio check by a human
-remain outside these automated regressions.
+The physical PSP was exercised through PSPLink/HostFS. The user also
+confirmed a successful launch from the Memory Stick XMB and smooth gameplay,
+but identified rough audio in the original single-buffer native build.
 
 ### Native PSP audio
 
 `PSP_NATIVE_AUDIO=ON` (default) uses the native `sceAudio` hardware API
 instead of SDL_mixer. A dedicated PSP audio thread combines three sound-effect
-channels with streamed PSM music from **libxmp** into a single stereo 16-bit
-44.1 kHz buffer. It supports sound priorities (handled by the existing
+channels with streamed PSM music from **libxmp** into a stereo 16-bit
+44.1 kHz stream. It supports sound priorities (handled by the existing
 engine), per-channel volume, pitch, pan, fades, music playback and stopping.
 The mixer synchronizes its audio callback and sample lifetimes with a PSP
 semaphore, and releases owned PCM once playback finishes.
+
+The native backend uses three rotating, 64-byte-aligned output blocks.
+`sceAudioOutputBlocking()` queues a PCM buffer address, not an immediate copy
+of its contents; mixing the next block into the same memory can corrupt audio
+that has not yet been played. Triple buffering prevents that reuse without
+introducing SDL or changing the engine's music/effect mixing levels.
+`-DPSP_AUDIO_MIX_DIAGNOSTICS=ON` enables clipping and buffer-timing counters
+for stress builds; the shipping configuration leaves these counters disabled.
+
+In a 120-second Arena 4 run on physical PSP hardware (333 MHz), the original
+single-buffer output reported **zero late audio blocks** and 126 clipped
+samples out of 10.8 million; neither timing starvation nor clipping explains
+persistent playback artifacts. After switching to three buffers, a second
+120-second hardware run finished with **zero late blocks**, **zero audio
+output errors** and no PSPLink exceptions. The diagnostic builds averaged
+56.87 FPS (single buffer) and 57.94 FPS (three buffers), respectively;
+randomized fights mean the difference is not a controlled speed comparison.
+The three-buffer fix also completed PPSSPP's strict classic JIT Arena 4 test
+for 120 seconds (59.4 FPS average, 23 measurement windows, zero audio output
+errors, clean shutdown). A fixed standalone EBOOT was installed on the PSP
+Memory Stick and verified byte-for-byte against the package. A human
+listening comparison of the fixed EBOOT remains necessary to confirm the
+audible improvement.
 
 SOUNDS.DAT samples are unsigned 8-bit mono. Fixed-point resampling converts
 each source and pitch to 44.1 kHz mono PCM, with a bounded 4 MiB converted

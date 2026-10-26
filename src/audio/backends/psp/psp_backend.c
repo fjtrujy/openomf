@@ -9,6 +9,9 @@
 
 #include <malloc.h>
 #include <pspaudio.h>
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+#include <pspkernel.h>
+#endif
 #include <pspthreadman.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -16,6 +19,7 @@
 
 #define PSP_MIX_RATE 44100
 #define PSP_MIX_FRAMES 512
+#define PSP_AUDIO_BUFFER_COUNT 3
 #define PSP_PCM_CACHE_BYTES (4u * 1024u * 1024u)
 #define PSP_PCM_CACHE_ENTRIES 256
 
@@ -57,6 +61,17 @@ typedef struct {
     unsigned long music_blocks;
     unsigned long effect_blocks;
     unsigned long sound_starts;
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+    uint64_t total_samples;
+    uint64_t clipped_samples;
+    uint64_t music_clipped_samples;
+    uint64_t effects_clipped_samples;
+    int peak_music;
+    int peak_mixed;
+    uint64_t late_blocks;
+    uint64_t max_block_interval_us;
+    uint64_t max_mix_us;
+#endif
     int16_t *output;
 } psp_audio_context;
 
@@ -111,16 +126,16 @@ static int16_t clip_sample(int value) {
 }
 
 /* The lock protects both the music callback lifetime and voice PCM pointers. */
-static void mix_block(psp_audio_context *ctx) {
+static void mix_block(psp_audio_context *ctx, int16_t *output) {
     if(!lock_audio(ctx)) {
-        memset(ctx->output, 0, PSP_MIX_FRAMES * 2 * sizeof(int16_t));
+        memset(output, 0, PSP_MIX_FRAMES * 2 * sizeof(int16_t));
         ++ctx->missed_blocks;
         return;
     }
 
-    memset(ctx->output, 0, PSP_MIX_FRAMES * 2 * sizeof(int16_t));
+    memset(output, 0, PSP_MIX_FRAMES * 2 * sizeof(int16_t));
     if(ctx->music.context) ++ctx->music_blocks;
-    music_source_render(&ctx->music, (char *)ctx->output,
+    music_source_render(&ctx->music, (char *)output,
                         PSP_MIX_FRAMES * 2 * sizeof(int16_t));
 
     bool has_effects = false;
@@ -139,8 +154,16 @@ static void mix_block(psp_audio_context *ctx) {
     }
     if(has_effects) ++ctx->effect_blocks;
     for(unsigned frame = 0; frame < PSP_MIX_FRAMES; ++frame) {
-        int left = ctx->output[frame * 2];
-        int right = ctx->output[frame * 2 + 1];
+        int left = output[frame * 2];
+        int right = output[frame * 2 + 1];
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+        const int music_left = left;
+        const int music_right = right;
+        const int abs_left = left < 0 ? -left : left;
+        const int abs_right = right < 0 ? -right : right;
+        if(abs_left > ctx->peak_music) ctx->peak_music = abs_left;
+        if(abs_right > ctx->peak_music) ctx->peak_music = abs_right;
+#endif
         for(int ch = 0; ch < SOUND_CHANNEL_COUNT; ++ch) {
             voice *v = &ctx->voices[ch];
             if(!v->pcm || v->cursor >= v->frames) continue;
@@ -164,8 +187,22 @@ static void mix_block(psp_audio_context *ctx) {
             left += (sample * lg) >> 15;
             right += (sample * rg) >> 15;
         }
-        ctx->output[frame * 2] = clip_sample(left);
-        ctx->output[frame * 2 + 1] = clip_sample(right);
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+        const int mixed[2] = {left, right};
+        const int music[2] = {music_left, music_right};
+        for(int c = 0; c < 2; ++c) {
+            const int magnitude = mixed[c] < 0 ? -mixed[c] : mixed[c];
+            if(magnitude > ctx->peak_mixed) ctx->peak_mixed = magnitude;
+            ++ctx->total_samples;
+            if(mixed[c] < -32768 || mixed[c] > 32767) {
+                ++ctx->clipped_samples;
+                if(music[c] < -32768 || music[c] > 32767) ++ctx->music_clipped_samples;
+                else ++ctx->effects_clipped_samples;
+            }
+        }
+#endif
+        output[frame * 2] = clip_sample(left);
+        output[frame * 2 + 1] = clip_sample(right);
     }
     // Expired uncached effects must not retain their PCM until replacement.
     for(int ch = 0; ch < SOUND_CHANNEL_COUNT; ++ch) {
@@ -179,9 +216,32 @@ static void mix_block(psp_audio_context *ctx) {
 static int audio_thread(SceSize args, void *argp) {
     (void)args; (void)argp;
     psp_audio_context *ctx = active_context;
+    unsigned buffer_index = 0;
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+    uint64_t previous_block_us = 0;
+    const uint64_t block_time_us = (uint64_t)PSP_MIX_FRAMES * 1000000 / PSP_MIX_RATE;
+#endif
     while(ctx && ctx->running) {
-        mix_block(ctx);
-        const int result = sceAudioOutputBlocking(ctx->output_channel, PSP_AUDIO_VOLUME_MAX, ctx->output);
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+        const uint64_t block_start = sceKernelGetSystemTimeWide();
+        if(previous_block_us) {
+            const uint64_t interval = block_start - previous_block_us;
+            if(interval > ctx->max_block_interval_us) ctx->max_block_interval_us = interval;
+            if(interval > block_time_us + 3000) ++ctx->late_blocks;
+        }
+        previous_block_us = block_start;
+#endif
+        // sceAudioOutputBlocking queues the source address. It does not
+        // consume the samples before returning, so the previously queued
+        // buffer must remain unchanged while the PSP audio hardware reads it.
+        int16_t *output = ctx->output + buffer_index * PSP_MIX_FRAMES * 2;
+        buffer_index = (buffer_index + 1) % PSP_AUDIO_BUFFER_COUNT;
+        mix_block(ctx, output);
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+        const uint64_t mix_us = sceKernelGetSystemTimeWide() - block_start;
+        if(mix_us > ctx->max_mix_us) ctx->max_mix_us = mix_us;
+#endif
+        const int result = sceAudioOutputBlocking(ctx->output_channel, PSP_AUDIO_VOLUME_MAX, output);
         if(result < 0) {
             ++ctx->missed_blocks;
             sceKernelDelayThread(1000);
@@ -221,7 +281,7 @@ static bool setup(void *ptr, unsigned rate, bool mono, int resampler,
     ctx->resampler = resampler;
     ctx->music_volume = clamp_volume(music_volume);
     ctx->sound_volume = (int)(clamp_volume(sound_volume) * 127.0f);
-    ctx->output = memalign(64, PSP_MIX_FRAMES * 2 * sizeof(int16_t));
+    ctx->output = memalign(64, PSP_AUDIO_BUFFER_COUNT * PSP_MIX_FRAMES * 2 * sizeof(int16_t));
     if(!ctx->output) goto failed;
     ctx->lock = sceKernelCreateSema("OpenOMFAudioLock", 0, 1, 1, NULL);
     if(ctx->lock < 0) goto failed;
@@ -236,7 +296,8 @@ static bool setup(void *ptr, unsigned rate, bool mono, int resampler,
         active_context = NULL;
         goto failed;
     }
-    log_info("PSP native audio: 44100 Hz stereo, %d-frame buffers, 3 sound channels", PSP_MIX_FRAMES);
+    log_info("PSP native audio: 44100 Hz stereo, %d-frame blocks, %d rotating buffers, 3 sound channels",
+             PSP_MIX_FRAMES, PSP_AUDIO_BUFFER_COUNT);
     return true;
 failed:
     if(ctx->thread >= 0) sceKernelDeleteThread(ctx->thread);
@@ -269,6 +330,15 @@ static void close_audio(void *ptr) {
              ctx->mixed_blocks, ctx->music_blocks, ctx->effect_blocks, ctx->sound_starts,
              ctx->missed_blocks, ctx->cache_hits, ctx->cache_misses,
              ctx->cache_count, (unsigned)(ctx->cache_bytes / 1024));
+#ifdef PSP_AUDIO_MIX_DIAGNOSTICS
+    log_info("PSP audio mix diagnostics: samples=%llu clipped=%llu music-only-clipped=%llu effects-clipped=%llu peak-music=%d peak-mix=%d",
+             (unsigned long long)ctx->total_samples, (unsigned long long)ctx->clipped_samples,
+             (unsigned long long)ctx->music_clipped_samples,
+             (unsigned long long)ctx->effects_clipped_samples, ctx->peak_music, ctx->peak_mixed);
+    log_info("PSP audio timing diagnostics: late-blocks=%llu max-interval=%lluus max-mix=%lluus",
+             (unsigned long long)ctx->late_blocks, (unsigned long long)ctx->max_block_interval_us,
+             (unsigned long long)ctx->max_mix_us);
+#endif
     for(unsigned i = 0; i < ctx->cache_count; ++i) free(ctx->cache[i].data);
     ctx->cache_count = 0;
     ctx->cache_bytes = 0;
