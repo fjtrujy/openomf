@@ -2,9 +2,10 @@
 
 This port compiles OpenOMF's original C game engine using the PSPSDK, with
 **native PSP GU sprite rendering**, **native PSP sceAudio mixing**,
-**native sceCtrl controller input**, and libxmp/PSM music. It is independent
-of the desktop OpenGL/epoxy CMake build. SDL2 is still used for video/window
-initialization, timing, remaining keyboard/GUI helpers and utilities,
+**native sceCtrl controller input**, **native PSP kernel timing**, and
+libxmp/PSM music. It is independent of the desktop OpenGL/epoxy CMake
+build. SDL2 is still used for video/window initialization and remaining
+keyboard/GUI helpers and utilities,
 but the default PSP build no longer initializes SDL joystick/GameController
 or haptic services, polls SDL input events, or links SDL_mixer.
 
@@ -151,9 +152,8 @@ and keyboard code is unchanged. PSP boot also enforces the native gamepad
 for player one if an old desktop keyboard configuration was saved.
 
 The PSP engine now bypasses SDL event polling, and startup skips SDL
-joystick/GameController/haptic initialization. It still initializes SDL
-video/timer services because its window, render and timing helpers depend
-on them; native timing and further SDL elimination are later milestones.
+joystick/GameController/haptic initialization. SDL is still initialized
+for the PSP video/window implementation and remaining SDL utilities.
 
 Build the previous input backend for comparisons:
 
@@ -169,6 +169,53 @@ actions. In PPSSPP 1.20.4, WebSocket debugger
 four directions, Cross, Circle, Start, and the four analog extremes.
 Traces confirmed the expected action bits, a Cross-driven menu-to-game
 transition, and return to neutral. The normal release has tracing OFF.
+
+### Native PSP timing
+
+`PSP_NATIVE_TIMING=ON` (default) uses the PSP kernel's monotonic
+`sceKernelGetSystemTimeWide()` clock (microseconds, converted to
+milliseconds) instead of `SDL_GetTicks64()`. Delays use
+`sceKernelDelayThread()` rather than `SDL_Delay()`; long waits are
+split into safe chunks to avoid microsecond argument overflow.
+The shared `utils/platform_time.h` interface is used throughout the
+game loop, combat/network timing diagnostics, software renderer and
+native GU frame limiter, including stress-test reporting. The low 32
+bits retain the same wraparound behavior as `SDL_GetTicks()`.
+
+To compare with the previous implementation:
+
+```sh
+psp-cmake -S ports/psp -B build/psp-sdl-timing -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DPSP_NATIVE_TIMING=OFF
+cmake --build build/psp-sdl-timing -j8
+```
+
+The native clock changes neither game tick rates nor the GPU's existing
+VBlank synchronization. Desktop builds still use SDL timing.
+SDL2 remains linked because the PSP video/window backend and other
+engine services still require it; this milestone does not imply a
+fully SDL-free executable.
+
+#### Native timing validation (October 26, 2026)
+
+| 120-second Arena 4 run | Average FPS | Lowest 5-second FPS window | Result |
+| --- | ---: | ---: | --- |
+| Real PSP, kernel timing, CPU 333 MHz | 57.80 | 47.4 | PASS |
+| PPSSPP classic JIT, kernel timing | 59.40 | 53.3 | PASS |
+| PPSSPP classic JIT, SDL timing fallback | 59.29 | 55.7 | PASS |
+
+All three tests completed the full 120 seconds using native GU,
+native sceAudio and native sceCtrl. The physical PSP reported no
+PSPLink exception, and its CPU clock returned to 222 MHz on normal
+exit. PPSSPP used fast memory with strict invalid-memory checking;
+neither run created a host crash report. Audio output error counts
+remained at zero. The real-PSP GU trace contained no CPU-effect
+fallback frames.
+
+The PPSSPP differences are within run-to-run scene variability:
+native timing is about independence from SDL, **not** a demonstrated
+FPS improvement. Gameplay pacing and the five-second/120-second
+stress reporting intervals were preserved.
 
 ## Repeatable gameplay stress tests
 

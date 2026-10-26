@@ -32,6 +32,7 @@
 #include "utils/crash.h"
 #include "utils/log.h"
 #include "utils/miscmath.h"
+#include "utils/platform_time.h"
 #include "video/enums.h"
 #include "video/vga_state.h"
 #include "video/video.h"
@@ -928,11 +929,11 @@ void game_state_call_dynamic_tick_apply(game_state *gs) {
     vector_iter_begin(&gs->objects, &it);
     foreach(it, robj) {
 #ifdef PSP_STRESS_DEMO
-        const uint64_t object_start = SDL_GetTicks64();
+        const uint64_t object_start = omf_time_ms();
 #endif
         object_dynamic_tick_apply(robj->obj);
 #ifdef PSP_STRESS_DEMO
-        const uint64_t object_elapsed = SDL_GetTicks64() - object_start;
+        const uint64_t object_elapsed = omf_time_ms() - object_start;
         if(object_elapsed > 40) {
             log_warn("PSP OBJECT slow apply: id=%u animation=%d time=%llums group=%d",
                      robj->obj->id, robj->obj->cur_animation ? robj->obj->cur_animation->id : -1,
@@ -943,11 +944,11 @@ void game_state_call_dynamic_tick_apply(game_state *gs) {
 
     const int delta = game_state_ms_per_dyntick(gs);
 #ifdef PSP_STRESS_DEMO
-    const uint64_t tracker_started = SDL_GetTicks64();
+    const uint64_t tracker_started = omf_time_ms();
 #endif
     sound_tracker_tick(&gs->tracker, delta, sound_pan_lookup_object, gs);
 #ifdef PSP_STRESS_DEMO
-    const uint64_t tracker_elapsed = SDL_GetTicks64() - tracker_started;
+    const uint64_t tracker_elapsed = omf_time_ms() - tracker_started;
     if(tracker_elapsed > 40) {
         log_warn("PSP SOUND_TRACKER slow tick: duration=%llums entries=%u",
                  (unsigned long long)tracker_elapsed, (unsigned)vector_size(&gs->tracker.entries));
@@ -971,7 +972,7 @@ void game_state_merge_sounds(game_state *old, game_state *new) {
 // This function is always called with the same interval, and game speed does not affect it
 void game_state_static_tick(game_state *gs, bool replay) {
 #ifdef PSP_STRESS_DEMO
-    const uint64_t static_start = SDL_GetTicks64();
+    const uint64_t static_start = omf_time_ms();
 #endif
     // Set scene crossfade values
     if(gs->this_wait_ticks > 0) {
@@ -1022,13 +1023,13 @@ void game_state_static_tick(game_state *gs, bool replay) {
     // Call static ticks for scene
     scene_static_tick(gs->sc, game_state_is_paused(gs));
 #ifdef PSP_STRESS_DEMO
-    const uint64_t static_scene_done = SDL_GetTicks64();
+    const uint64_t static_scene_done = omf_time_ms();
 #endif
 
     // Call static tick functions
     game_state_call_static_tick(gs);
 #ifdef PSP_STRESS_DEMO
-    const uint64_t static_done = SDL_GetTicks64();
+    const uint64_t static_done = omf_time_ms();
     if(static_done - static_start > 80) {
         log_warn("PSP STATIC expensive tick: scene=%u objects=%u scene/setup=%llums objects=%llums",
                  gs->this_id, (unsigned)vector_size(&gs->objects),
@@ -1041,7 +1042,7 @@ void game_state_static_tick(game_state *gs, bool replay) {
 // This function is called when the game speed requires it
 void game_state_dynamic_tick(game_state *gs, bool replay) {
 #ifdef PSP_STRESS_DEMO
-    const uint64_t profile_start = SDL_GetTicks64();
+    const uint64_t profile_start = omf_time_ms();
     uint64_t profile_scene = profile_start;
     uint64_t profile_input = profile_start;
     uint64_t profile_cleanup = profile_start;
@@ -1099,7 +1100,7 @@ void game_state_dynamic_tick(game_state *gs, bool replay) {
     // Tick scene
     scene_dynamic_tick(gs->sc, game_state_is_paused(gs));
 #ifdef PSP_STRESS_DEMO
-    profile_scene = SDL_GetTicks64();
+    profile_scene = omf_time_ms();
 #endif
 
     // Poll input. If console is opened, do not poll the controllers.
@@ -1107,38 +1108,38 @@ void game_state_dynamic_tick(game_state *gs, bool replay) {
         scene_input_poll(gs->sc);
     }
 #ifdef PSP_STRESS_DEMO
-    profile_input = SDL_GetTicks64();
+    profile_input = omf_time_ms();
 #endif
 
     if(!game_state_is_paused(gs)) {
         // Clean up objects
         game_state_cleanup(gs);
 #ifdef PSP_STRESS_DEMO
-        profile_cleanup = SDL_GetTicks64();
+        profile_cleanup = omf_time_ms();
 #endif
 
         // Advance animations first so movement and collision see the current tick's frames
         game_state_call_dynamic_tick_advance(gs);
 #ifdef PSP_STRESS_DEMO
-        profile_advance = SDL_GetTicks64();
+        profile_advance = omf_time_ms();
 #endif
 
         // Call object_move for all objects
         game_state_call_move(gs);
 #ifdef PSP_STRESS_DEMO
-        profile_move = SDL_GetTicks64();
+        profile_move = omf_time_ms();
 #endif
 
         // Handle physics for all pairs of objects
         game_state_call_collide(gs);
 #ifdef PSP_STRESS_DEMO
-        profile_collide = SDL_GetTicks64();
+        profile_collide = omf_time_ms();
 #endif
 
         // Tick all objects
         game_state_call_dynamic_tick_apply(gs);
 #ifdef PSP_STRESS_DEMO
-        profile_apply = SDL_GetTicks64();
+        profile_apply = omf_time_ms();
 #endif
 
         // Increment tick

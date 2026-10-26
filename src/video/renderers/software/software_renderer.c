@@ -2,6 +2,7 @@
 
 #include "utils/allocator.h"
 #include "utils/log.h"
+#include "utils/platform_time.h"
 #include "video/enums.h"
 #include "video/vga_state.h"
 
@@ -82,7 +83,7 @@ static bool setup(void *data, int width, int height, bool fullscreen, bool vsync
     ctx->fullscreen = fullscreen;
     ctx->vsync = vsync;
     ctx->fps_limit = fps;
-    ctx->last_frame = SDL_GetTicks();
+    ctx->last_frame = omf_time_ms32();
 
     ctx->window = SDL_CreateWindow("OpenOMF", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                     width, height, SDL_WINDOW_SHOWN);
@@ -326,10 +327,10 @@ static void finish(void *data) {
     SDL_RenderPresent(ctx->sdl);
     if(ctx->fps_limit > 0) {
         const uint32_t min_frame = 1000 / (unsigned)ctx->fps_limit;
-        const uint32_t now = SDL_GetTicks();
-        if(now - ctx->last_frame < min_frame) SDL_Delay(min_frame - (now - ctx->last_frame));
+        const uint32_t now = omf_time_ms32();
+        if(now - ctx->last_frame < min_frame) omf_sleep_ms(min_frame - (now - ctx->last_frame));
     }
-    ctx->last_frame = SDL_GetTicks();
+    ctx->last_frame = omf_time_ms32();
 }
 
 static void area_prepare(void *data, const SDL_Rect *area) {

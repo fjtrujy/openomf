@@ -16,6 +16,7 @@
 #include "utils/list.h"
 #include "utils/log.h"
 #include "utils/miscmath.h"
+#include "utils/platform_time.h"
 
 typedef struct {
     ENetHost *host;
@@ -366,7 +367,7 @@ int rewind_and_replay(wtf *data, controller *ctrl) {
         }
     }
 
-    uint64_t replay_start = SDL_GetTicks64();
+    uint64_t replay_start = omf_time_ms();
     int tick_count = 0;
 
     uint32_t arena_hash;
@@ -581,7 +582,7 @@ int rewind_and_replay(wtf *data, controller *ctrl) {
         tick_count++;
     }
 
-    uint64_t replay_end = SDL_GetTicks64();
+    uint64_t replay_end = omf_time_ms();
 
     if(gs_new == NULL) {
         // we weren't able to make a new state backup, so restore the old one

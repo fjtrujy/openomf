@@ -14,6 +14,7 @@
 #include "resources/script_cache.h"
 #include "utils/log.h"
 #include "utils/miscmath.h"
+#include "utils/platform_time.h"
 #include "utils/random.h"
 #include "utils/str.h"
 #include "utils/vec.h"
@@ -196,7 +197,7 @@ void player_run_advance(object *obj) {
 
 void player_run_apply(object *obj) {
 #ifdef PSP_STRESS_DEMO
-    const uint64_t player_apply_start = SDL_GetTicks64();
+    const uint64_t player_apply_start = omf_time_ms();
     uint64_t player_audio_cost = 0;
 #endif
     // Some vars for easier life
@@ -602,11 +603,11 @@ void player_run_apply(object *obj) {
             }
             if(allow_sound_playback) {
 #ifdef PSP_STRESS_DEMO
-                const uint64_t sound_started = SDL_GetTicks64();
+                const uint64_t sound_started = omf_time_ms();
 #endif
                 game_state_play_sound(obj->gs, sound_id, &opts);
 #ifdef PSP_STRESS_DEMO
-                player_audio_cost += SDL_GetTicks64() - sound_started;
+                player_audio_cost += omf_time_ms() - sound_started;
 #endif
             }
         }
@@ -871,7 +872,7 @@ void player_run_apply(object *obj) {
         rstate->timer++;
     }
 #ifdef PSP_STRESS_DEMO
-    const uint64_t player_elapsed = SDL_GetTicks64() - player_apply_start;
+    const uint64_t player_elapsed = omf_time_ms() - player_apply_start;
     if(player_elapsed > 40) {
         log_warn("PSP PLAYER apply cost: obj=%u anim=%d total=%llums sound=%llums entered=%d",
                  obj->id, obj->cur_animation ? obj->cur_animation->id : -1,

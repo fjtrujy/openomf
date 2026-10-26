@@ -23,6 +23,7 @@
 #include <SDL.h>
 #include <malloc.h>
 #include <pspdisplay.h>
+#include "utils/platform_time.h"
 #include <pspge.h>
 #include <pspgu.h>
 #include <pspkernel.h>
@@ -173,7 +174,7 @@ static bool setup(void *userdata, int w, int h, bool fullscreen, bool vsync, int
     ctx->aspect = aspect;
     ctx->fps = fps;
     ctx->fb_scale = fb_scale;
-    ctx->last_frame = SDL_GetTicks();
+    ctx->last_frame = omf_time_ms32();
     ctx->window = SDL_CreateWindow("OpenOMF PSP GU", SDL_WINDOWPOS_UNDEFINED,
                                     SDL_WINDOWPOS_UNDEFINED, SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
     if(!ctx->window) {
@@ -644,7 +645,7 @@ static void gpu_draw_cpu_frame(gu_context *ctx, const SDL_Rect *vp) {
 static void finish(void *userdata) {
     gu_context *ctx = userdata;
 #ifdef PSP_GU_PROFILE
-    const uint64_t gu_start_ms = SDL_GetTicks64();
+    const uint64_t gu_start_ms = omf_time_ms();
 #endif
     flush_palette(ctx);
     // CLUT variants cannot represent destination-index remap. Replay precisely
@@ -700,11 +701,11 @@ static void finish(void *userdata) {
     }
     sceGuFinish();
 #ifdef PSP_GU_PROFILE
-    const uint64_t gu_commands_ms = SDL_GetTicks64();
+    const uint64_t gu_commands_ms = omf_time_ms();
 #endif
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
 #ifdef PSP_GU_PROFILE
-    const uint64_t gu_sync_ms = SDL_GetTicks64();
+    const uint64_t gu_sync_ms = omf_time_ms();
 #endif
     // The PSP display refreshes at 60 Hz. Even if desktop settings request
     // VSync OFF, cap native presentation to VBlank: otherwise the engine can
@@ -712,7 +713,7 @@ static void finish(void *userdata) {
     sceDisplayWaitVblankStart();
     sceGuSwapBuffers();
 #ifdef PSP_GU_PROFILE
-    const uint64_t gu_swap_ms = SDL_GetTicks64();
+    const uint64_t gu_swap_ms = omf_time_ms();
     if(gu_swap_ms - gu_start_ms > 120) {
         log_warn("PSP GU slow frame: commands=%llums sync=%llums vblank/swap=%llums draws=%u cache=%u KiB CPU=%d",
                  (unsigned long long)(gu_commands_ms - gu_start_ms),
@@ -723,10 +724,10 @@ static void finish(void *userdata) {
 #endif
     if(ctx->fps > 0) {
         const uint32_t delay = 1000 / (uint32_t)ctx->fps;
-        const uint32_t now = SDL_GetTicks();
-        if(now - ctx->last_frame < delay) SDL_Delay(delay - (now - ctx->last_frame));
+        const uint32_t now = omf_time_ms32();
+        if(now - ctx->last_frame < delay) omf_sleep_ms(delay - (now - ctx->last_frame));
     }
-    ctx->last_frame = SDL_GetTicks();
+    ctx->last_frame = omf_time_ms32();
     // Keep frequent I/O off flash storage; opt in explicitly when profiling.
 #ifdef PSP_GU_PROFILE
     if(ctx->frame_no % 600 == 0) {

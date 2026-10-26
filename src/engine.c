@@ -17,6 +17,7 @@
 #include "utils/allocator.h"
 #include "utils/log.h"
 #include "utils/miscmath.h"
+#include "utils/platform_time.h"
 #include "utils/png_writer.h"
 #include "utils/time_fmt.h"
 #include "video/vga_state.h"
@@ -163,6 +164,9 @@ void engine_run(const engine_init_flags *init_flags) {
 #endif
 
     log_info(" --- BEGIN GAME LOG ---");
+#if defined(__PSP__) && defined(PSP_NATIVE_TIMING)
+    log_info("PSP native timing: monotonic kernel clock (milliseconds), kernel thread delays");
+#endif
 
     // Game start timeout.
     // Wait a moment so that people are mentally prepared
@@ -204,21 +208,21 @@ void engine_run(const engine_init_flags *init_flags) {
     game_state_set_next(gs, SCENE_ARENA0 + PSP_STRESS_ARENA);
     log_info("PSP STRESS: queued AI-vs-AI arena %u for 120s sustained match",
              (unsigned)PSP_STRESS_ARENA);
-    uint64_t stress_started = SDL_GetTicks64();
+    uint64_t stress_started = omf_time_ms();
     uint64_t stress_last_report = stress_started;
     uint64_t stress_frames = 0;
 #endif
 
     // Game loop
-    uint64_t frame_start = SDL_GetTicks64(); // Set game tick timer
+    uint64_t frame_start = omf_time_ms(); // Set game tick timer
     int dynamic_wait = 0;
     int static_wait = 0;
     while(run && game_state_is_running(gs)) {
 #ifdef PSP_STRESS_DEMO
-        const uint64_t stress_frame_begin = SDL_GetTicks64();
+        const uint64_t stress_frame_begin = omf_time_ms();
 #endif
 #ifdef PSP_STRESS_DEMO
-        const uint64_t stress_now = SDL_GetTicks64();
+        const uint64_t stress_now = omf_time_ms();
         const uint64_t stress_elapsed = stress_now - stress_started;
         // Never replace live controllers/pilots during an active arena:
         // the scene owns references to them until teardown. Test one arena
@@ -364,7 +368,7 @@ void engine_run(const engine_init_flags *init_flags) {
         // hide mouse after n ticks
 #ifndef PSP_NATIVE_INPUT
         if(mouse_visible_ticks > 0) {
-            mouse_visible_ticks -= SDL_GetTicks64() - frame_start;
+            mouse_visible_ticks -= omf_time_ms() - frame_start;
             if(mouse_visible_ticks <= 0) {
                 SDL_ShowCursor(0);
             }
@@ -372,8 +376,8 @@ void engine_run(const engine_init_flags *init_flags) {
 #endif
 
         // Render scene
-        uint64_t frame_dt = SDL_GetTicks64() - frame_start;
-        frame_start = SDL_GetTicks64();
+        uint64_t frame_dt = omf_time_ms() - frame_start;
+        frame_start = omf_time_ms();
         if(!visual_debugger) {
             dynamic_wait += frame_dt;
             static_wait += frame_dt;
@@ -426,7 +430,7 @@ void engine_run(const engine_init_flags *init_flags) {
                 dynamic_wait -= dyntick_ms;
                 if(gs->delay > 0) {
                     log_debug("applying delay %d", gs->delay);
-                    SDL_Delay(4);
+                    omf_sleep_ms(4);
                     gs->delay--;
                     dynamic_wait -= 4;
                 }
@@ -441,13 +445,13 @@ void engine_run(const engine_init_flags *init_flags) {
 
         // Do the actual video rendering jobs
 #ifdef PSP_STRESS_DEMO
-        const uint64_t stress_before_render = SDL_GetTicks64();
+        const uint64_t stress_before_render = omf_time_ms();
 #endif
         if(enable_screen_updates) {
             video_render_prepare(game_state_get_framebuffer_options(gs));
             game_state_render(gs);
 #ifdef PSP_STRESS_DEMO
-            const uint64_t stress_before_finish = SDL_GetTicks64();
+            const uint64_t stress_before_finish = omf_time_ms();
 #endif
             if(debugger_render) {
                 game_state_debug(gs);
@@ -456,7 +460,7 @@ void engine_run(const engine_init_flags *init_flags) {
             console_render();
             video_render_finish();
 #ifdef PSP_STRESS_DEMO
-            const uint64_t stress_after_finish = SDL_GetTicks64();
+            const uint64_t stress_after_finish = omf_time_ms();
             if(stress_after_finish - stress_frame_begin > 120) {
                 log_warn("PSP STRESS slow frame: scene=%u update=%llums draw=%llums finish=%llums",
                          gs->this_id,
@@ -468,7 +472,7 @@ void engine_run(const engine_init_flags *init_flags) {
 #endif
         } else {
             // If screen updates are disabled, then wait
-            SDL_Delay(1);
+            omf_sleep_ms(1);
         }
     }
 
