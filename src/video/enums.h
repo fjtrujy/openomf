@@ -23,6 +23,10 @@ typedef enum
     // SPRITE_INDEX_ADD requires this, and is allowed to break
     // whatever effects aren't used on the credits.
     FBUFOPT_CREDITS = 0x01,
+    // Hint to renderers approximating destination remaps that the intro's
+    // lightning overlays must brighten rather than darken the destination.
+    // Exact indexed renderers ignore this hint.
+    FBUFOPT_BRIGHT_DESTINATION_REMAP = 0x02,
 } renderer_framebuffer_options;
 
 typedef enum

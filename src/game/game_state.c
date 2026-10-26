@@ -662,6 +662,9 @@ unsigned game_state_get_framebuffer_options(game_state *gs) {
     if(gs->this_id == SCENE_CREDITS) {
         return FBUFOPT_CREDITS;
     }
+    if(gs->this_id == SCENE_INTRO) {
+        return FBUFOPT_BRIGHT_DESTINATION_REMAP;
+    }
 
     return 0;
 }

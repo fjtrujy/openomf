@@ -69,10 +69,12 @@ and all local files. Do not reset, clean, rewrite or force-push it.
 
 [INTRO_2097_REVEAL_ISSUE.md](INTRO_2097_REVEAL_ISSUE.md) documents a
 **still-open** late-intro mismatch between native macOS and PSP during the OMF
-logo / lightning reveal of 2097. The earlier EPIC MEGAGAMES splash has been
-partially compared and does not validate that later sequence. Keep this bug
-separate from initial platform integration unless its fix is required to
-make a focused renderer PR correct; do not falsely claim visual parity.
+logo / lightning reveal of 2097. The bright-GU remap approximation was verified
+in PPSSPP on October 26 and removes the original dark silhouette; physical PSP
+verification is optional and not yet repeated. The earlier EPIC MEGAGAMES
+splash comparison does not validate this late sequence. Keep this fix separate
+from initial platform integration unless it is ready and required for a focused
+renderer PR; do not falsely claim pixel-exact visual parity.
 
 ## Handover expectation
 

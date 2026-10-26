@@ -472,9 +472,14 @@ static int get_clut(gu_context *ctx, const draw_command *cmd) {
             continue;
         }
         if(cmd->remap_rounds > 0) {
-            const unsigned a = i == cmd->transparent ? 0 :
-                    (unsigned)imin(210, 60 + cmd->remap_rounds * 25);
-            v->colors[i] = a << 24;
+            // The intro's electrical flash lightens destination indices.
+            // A black-alpha approximation incorrectly turns it into a dark
+            // silhouette. Use a bright blend without forcing CPU replay.
+            const bool bright = !!(ctx->framebuffer_options & FBUFOPT_BRIGHT_DESTINATION_REMAP);
+            const unsigned a = i == cmd->transparent ? 0 : (unsigned)(bright ?
+                    imin(255, 120 + cmd->remap_rounds * 60) :
+                    imin(210, 60 + cmd->remap_rounds * 25));
+            v->colors[i] = (a << 24) | (bright ? 0x00ffffffu : 0u);
             continue;
         }
         if(cmd->options & SPRITE_DARK_TINT) {
