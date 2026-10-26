@@ -55,12 +55,12 @@ void menu_help_render(component *c) {
     text_document_draw(local->td, 15, 20);
 }
 
-static bool menu_help_event(component *c, SDL_Event *event) {
+static bool menu_help_event(component *c, omf_event *event) {
     if(event->type != SDL_KEYDOWN) {
         return false;
     }
     help_menu_data *local = menu_get_userdata(c);
-    SDL_Scancode sc = event->key.keysym.scancode;
+    omf_scancode sc = event->key.keysym.scancode;
     if(sc == SDL_SCANCODE_PAGEUP && local->page > 0) {
         local->page--;
         help_menu_update(local);

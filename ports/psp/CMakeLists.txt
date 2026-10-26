@@ -85,9 +85,11 @@ add_custom_target(omf_psp_language DEPENDS "${OMF_LANG2_FILE}")
 add_dependencies(openomf_psp omf_psp_language)
 target_include_directories(openomf_psp PRIVATE
     "${OMF_ROOT}/src"
-    "${PSPDEV}/psp/include/SDL2"
     "${PSPDEV}/psp/sdk/include"
 )
+if(NOT PSP_STANDALONE)
+    target_include_directories(openomf_psp PRIVATE "${PSPDEV}/psp/include/SDL2")
+endif()
 # CMake sometimes treats the SDK headers as an implicit compiler include
 # directory and drops the -I even though this cross GCC does not search it.
 target_compile_options(openomf_psp PRIVATE "-I${PSPDEV}/psp/sdk/include")

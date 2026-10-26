@@ -10,7 +10,7 @@
  * sprite commands through the existing indexed compositing rules and submit
  * one RGBA image to GU. Offscreen capture also uses indexed compositing.
  *
- * The PSP GU owns the framebuffer and display lifecycle. SDL_Rect remains a
+ * The PSP GU owns the framebuffer and display lifecycle. omf_rect remains a
  * shared renderer interface type; a native PSP build needs no SDL window.
  */
 #include "video/renderers/psp/gu_renderer.h"
@@ -21,7 +21,7 @@
 #include "video/vga_state.h"
 
 #ifndef PSP_NATIVE_DISPLAY
-#include <SDL.h>
+#include "utils/platform_types.h"
 #endif
 #include <malloc.h>
 #include <pspdisplay.h>
@@ -63,7 +63,7 @@ typedef struct {
 typedef struct {
     uint16_t texture;
     int transparent;
-    SDL_Rect dst;
+    omf_rect dst;
     int remap_offset, remap_rounds;
     int palette_offset, palette_limit, opacity;
     unsigned flip, options;
@@ -107,7 +107,7 @@ typedef struct {
     unsigned clut_count;
     indexed_pixel *cpu_frame;
     uint32_t *rgba_frame;
-    SDL_Rect offscreen_area;
+    omf_rect offscreen_area;
     video_screenshot_signal screenshot;
 } gu_context;
 
@@ -361,7 +361,7 @@ static void prepare(void *userdata, unsigned framebuffer_options) {
     ctx->framebuffer_options = framebuffer_options;
 }
 
-static void draw(void *userdata, const surface *src, SDL_Rect *rect, int remap_offset, int remap_rounds,
+static void draw(void *userdata, const surface *src, omf_rect *rect, int remap_offset, int remap_rounds,
                  int palette_offset, int palette_limit, int opacity, unsigned int flip, unsigned int options) {
     gu_context *ctx = userdata;
     if(!src || !src->data || rect->w <= 0 || rect->h <= 0) return;
@@ -494,8 +494,8 @@ static int get_clut(gu_context *ctx, const draw_command *cmd) {
     return slot;
 }
 
-static SDL_Rect viewport(const gu_context *ctx) {
-    SDL_Rect r = {0, 0, SCREEN_W, SCREEN_H};
+static omf_rect viewport(const gu_context *ctx) {
+    omf_rect r = {0, 0, SCREEN_W, SCREEN_H};
     if(ctx->aspect == 0) {
         r.w = SCREEN_H * 4 / 3;
         r.x = (SCREEN_W - r.w) / 2;
@@ -505,7 +505,7 @@ static SDL_Rect viewport(const gu_context *ctx) {
     return r;
 }
 
-static void sprite_vertices(gu_sprite_vertex *v, const SDL_Rect *screen, int tw, int th, unsigned flip) {
+static void sprite_vertices(gu_sprite_vertex *v, const omf_rect *screen, int tw, int th, unsigned flip) {
     v[0] = (gu_sprite_vertex) {
         .u = flip & FLIP_HORIZONTAL ? tw : 0,
         .v = flip & FLIP_VERTICAL ? th : 0,
@@ -518,7 +518,7 @@ static void sprite_vertices(gu_sprite_vertex *v, const SDL_Rect *screen, int tw,
     };
 }
 
-static void gpu_draw(gu_context *ctx, const draw_command *cmd, const SDL_Rect *vp, int clut,
+static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *vp, int clut,
                      bool load_clut) {
     gu_texture *tex = &ctx->textures[cmd->texture];
     if(load_clut) {
@@ -540,7 +540,7 @@ static void gpu_draw(gu_context *ctx, const draw_command *cmd, const SDL_Rect *v
     sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
     sceGuColor(((unsigned)(uint8_t)cmd->opacity << 24) | 0x00ffffffu);
     // Preserve the GL3 logical coordinate system; the PSP scales at the end.
-    SDL_Rect dst = {
+    omf_rect dst = {
         vp->x + cmd->dst.x * vp->w / GAME_W,
         vp->y + cmd->dst.y * vp->h / GAME_H,
         (cmd->dst.w * vp->w + GAME_W / 2) / GAME_W,
@@ -561,7 +561,7 @@ static indexed_pixel *cpu_buffer(gu_context *ctx) {
 
 static void cpu_draw(gu_context *ctx, const draw_command *cmd) {
     const gu_texture *tex = &ctx->textures[cmd->texture];
-    const SDL_Rect *r = &cmd->dst;
+    const omf_rect *r = &cmd->dst;
     const int x0 = imax(0, r->x), y0 = imax(0, r->y);
     const int x1 = imin(GAME_W, r->x + r->w), y1 = imin(GAME_H, r->y + r->h);
     if(r->w <= 0 || r->h <= 0) return;
@@ -645,13 +645,13 @@ static void capture_cpu(gu_context *ctx) {
         rgb[i * 3 + 1] = c.g;
         rgb[i * 3 + 2] = c.b;
     }
-    SDL_Rect r = {0, 0, GAME_W, GAME_H};
+    omf_rect r = {0, 0, GAME_W, GAME_H};
     ctx->screenshot(&r, rgb, false);
     ctx->screenshot = NULL;
     free(rgb);
 }
 
-static void gpu_draw_cpu_frame(gu_context *ctx, const SDL_Rect *vp) {
+static void gpu_draw_cpu_frame(gu_context *ctx, const omf_rect *vp) {
     if(!ctx->rgba_frame) {
         ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
     }
@@ -707,7 +707,7 @@ static void finish(void *userdata) {
         return;
     }
     if(ctx->screenshot && ctx->needs_cpu) capture_cpu(ctx);
-    SDL_Rect vp = viewport(ctx);
+    omf_rect vp = viewport(ctx);
     sceGuStart(GU_DIRECT, ctx->display_list);
     sceGuClearColor(0xff000000);
     sceGuClear(GU_COLOR_BUFFER_BIT);
@@ -771,7 +771,7 @@ static void finish(void *userdata) {
 #endif
 }
 
-static void area_prepare(void *userdata, const SDL_Rect *area) {
+static void area_prepare(void *userdata, const omf_rect *area) {
     gu_context *ctx = userdata;
     ctx->command_count = 0;
     ctx->frame_no++;
@@ -781,7 +781,7 @@ static void area_prepare(void *userdata, const SDL_Rect *area) {
 
 static void area_finish(void *userdata, surface *dst) {
     gu_context *ctx = userdata;
-    const SDL_Rect *r = &ctx->offscreen_area;
+    const omf_rect *r = &ctx->offscreen_area;
     flush_palette(ctx);
     if(!cpu_replay(ctx)) {
         surface_create(dst, 1, 1);

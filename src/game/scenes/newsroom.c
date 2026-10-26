@@ -1,4 +1,5 @@
 #include "game/scenes/newsroom.h"
+#include <ctype.h>
 #include "game/audio/music_tracker.h"
 #include "game/gui/dialog.h"
 #include "game/gui/menu_background.h"

@@ -126,7 +126,7 @@ static void handle_scoreboard_save(scoreboard_local *local) {
     scores_write(&local->data);
 }
 
-static bool scoreboard_event(scene *scene, SDL_Event *event) {
+static bool scoreboard_event(scene *scene, omf_event *event) {
     scoreboard_local *local = scene_get_userdata(scene);
 
     // If we are in writing mode, try handling text input

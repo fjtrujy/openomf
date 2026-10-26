@@ -66,7 +66,7 @@ void component_render(component *c) {
     }
 }
 
-bool component_event(component *c, SDL_Event *event) {
+bool component_event(component *c, omf_event *event) {
     if(c->event) {
         return c->event(c, event);
     }

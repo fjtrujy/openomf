@@ -23,7 +23,7 @@ static inline void omf_sleep_ms(uint32_t milliseconds) {
 }
 
 #else
-#include <SDL.h>
+#include "utils/platform_types.h"
 
 static inline uint64_t omf_time_ms(void) {
     return SDL_GetTicks64();

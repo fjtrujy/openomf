@@ -78,7 +78,7 @@ void gui_frame_render(gui_frame *frame) {
     }
 }
 
-bool gui_frame_event(gui_frame *frame, SDL_Event *event) {
+bool gui_frame_event(gui_frame *frame, omf_event *event) {
     if(frame->root_node) {
         return component_event(frame->root_node, event);
     }

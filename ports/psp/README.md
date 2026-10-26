@@ -36,12 +36,20 @@ the current EBOOT working directory for bundled resources, and standard
 file I/O for network trace files. Inapplicable PSP keyboard and clipboard
 operations remain inert. No SDL2 runtime or SDL2_mixer library is linked.
 
-The shared renderer/UI interfaces still include SDL headers for
-`SDL_Rect`, `SDL_Event`, keyboard constants, and other common types;
-`ports/psp/psp_sdl_compat.c` supplies limited implementations for
-legacy utility calls. This is a **link-time SDL2-free** milestone, not
-yet a complete source-level migration away from SDL types. Desktop
-sources and behavior are unchanged.
+The shared renderer, scene, GUI-event and keyboard interfaces use
+OpenOMF-owned `omf_rect`, `omf_event` and `omf_scancode` types, declared
+in `src/utils/platform_types.h`. On desktop and legacy SDL-linked PSP
+builds these are SDL aliases, maintaining the original ABI. With
+`PSP_STANDALONE=ON`, the PSP compiles its own minimal versions without
+any SDL SDK headers or SDL2 include directory. The compile dependency
+files and linker flags can be inspected to verify this separation.
+
+`ports/psp/psp_sdl_compat.c` still provides limited `SDL_*`-named
+legacy utility operations (logging locks, resource paths, trace files,
+inert keyboard and clipboard). Those names remain in some implementation
+files, but are not an external SDL SDK or runtime dependency. Further
+cleanup can rename these to entirely platform-neutral services.
+Desktop behavior and the SDL-linked build are preserved.
 
 The `Software` renderer is preserved in standalone mode by forcing the
 existing indexed **CPU compositor** and presenting its RGBA result through
@@ -91,6 +99,23 @@ The legacy SDL-linked PSP configuration builds successfully as well.
 These are randomized matches with loading included, not deterministic
 CPU-only benchmarks. The full human-controlled campaign, PSP system
 HOME button and direct XMB launch still require hands-on validation.
+
+#### Platform-neutral shared types validation (October 26, 2026)
+
+| Run | Average FPS | Result |
+| --- | ---: | --- |
+| Real PSP native GU, 120 seconds | 56.56 | PASS |
+| PPSSPP classic JIT native GU, 120 seconds | 59.46 | PASS |
+| PPSSPP CPU `Software` fallback, 120 seconds | 29.71 | PASS |
+
+The PSP build no longer adds `psp/include/SDL2` to its include paths
+and the standalone dependency files reference no SDL2 SDK headers.
+Native and legacy SDL-linked PSP builds compiled after the type migration,
+as did the exact-effects and software-fallback variants. Hardware tests
+reported zero PSPLink exceptions and audio output errors and restored
+222 MHz on normal shutdown. Host C syntax checks of selected shared
+modules also passed; a complete desktop build remains unavailable on
+this Mac without SDL2_mixer.
 
 Original One Must Fall 2097 data are not in git. `package.sh` downloads the
 freeware data archive from `www.omf2097.com` if no archive is present. You can

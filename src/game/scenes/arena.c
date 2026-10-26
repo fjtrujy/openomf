@@ -1,4 +1,4 @@
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
@@ -1453,7 +1453,7 @@ void arena_input_tick(scene *scene) {
     controller_free_chain(menu_ev);
 }
 
-bool arena_event(scene *scene, SDL_Event *e) {
+bool arena_event(scene *scene, omf_event *e) {
     return false;
 }
 

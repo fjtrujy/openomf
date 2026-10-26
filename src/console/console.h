@@ -2,7 +2,7 @@
 #define CONSOLE_H
 
 #include "game/game_state_type.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <stdbool.h>
 
 // return 0 on success, otherwise return error code
@@ -10,7 +10,7 @@ typedef int (*command_func)(game_state *scene, int argc, char **argv);
 
 bool console_init(void);
 void console_close(void);
-void console_event(game_state *scene, SDL_Event *event);
+void console_event(game_state *scene, omf_event *event);
 void console_render(void);
 void console_tick(game_state *gs);
 void console_add_cmd(const char *name, command_func func, const char *doc);

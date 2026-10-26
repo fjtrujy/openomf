@@ -8,6 +8,7 @@
 #include "utils/log.h"
 #include "video/video.h"
 #include <stdio.h>
+#include <ctype.h>
 
 #if !defined(WIN32) && !defined(_WIN32)
 #include <fcntl.h>
@@ -274,7 +275,7 @@ void console_close(void) {
     omf_free(con);
 }
 
-void console_event(game_state *gs, SDL_Event *e) {
+void console_event(game_state *gs, omf_event *e) {
     if(e->type == SDL_TEXTINPUT) {
         size_t len = str_size(&con->input);
         if(strlen(e->text.text) == 1) {

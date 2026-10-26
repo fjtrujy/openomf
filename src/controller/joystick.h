@@ -2,7 +2,7 @@
 #define JOYSTICK_H
 
 #include "controller/controller.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 
 typedef struct {
     int x_axis;
@@ -13,12 +13,15 @@ typedef struct {
     int escape;
 } joystick_keys;
 
+#ifndef PSP_STANDALONE
+/* Desktop/legacy SDL driver state, not part of the native PSP API. */
 typedef struct {
     SDL_GameController *joy;
     SDL_Haptic *haptic;
     joystick_keys *keys;
     int rumble;
 } joystick;
+#endif
 
 int joystick_create(controller *ctrl, int joystick_id);
 void joystick_free(controller *ctrl);

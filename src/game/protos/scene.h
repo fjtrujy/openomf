@@ -10,14 +10,14 @@
 #include "game/utils/ticktimer.h"
 #include "resources/bk.h"
 #include "video/surface.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 
 typedef struct scene_t scene;
 typedef struct game_player_t game_player;
 typedef struct game_state_t game_state;
 
 typedef void (*scene_free_cb)(scene *scene);
-typedef bool (*scene_event_cb)(scene *scene, SDL_Event *event);
+typedef bool (*scene_event_cb)(scene *scene, omf_event *event);
 typedef void (*scene_render_cb)(scene *scene);
 typedef void (*scene_render_overlay_cb)(scene *scene);
 typedef void (*scene_debug_cb)(scene *scene);
@@ -57,7 +57,7 @@ int scene_create(scene *scene, game_state *gs, int scene_id);
 int scene_load_har(scene *scene, int player_id);
 void scene_init(scene *scene);
 void scene_free(scene *scene);
-bool scene_event(scene *scene, SDL_Event *event);
+bool scene_event(scene *scene, omf_event *event);
 void scene_render_overlay(scene *scene);
 void scene_render(scene *scene);
 void scene_debug(scene *scene);

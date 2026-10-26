@@ -856,7 +856,7 @@ static void load_hars(scene *scene, melee_local *local, bool player2_is_selectab
     }
 }
 
-bool melee_event_cb(scene *scene, SDL_Event *e) {
+bool melee_event_cb(scene *scene, omf_event *e) {
     melee_local *local = scene_get_userdata(scene);
     if(local->page == HAR_SELECT && e->type == SDL_KEYDOWN && SDLK_1 <= e->key.keysym.sym &&
        e->key.keysym.sym <= SDLK_6) {

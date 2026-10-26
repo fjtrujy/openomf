@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#include <SDL.h>
+#include "utils/platform_types.h"
 
 #include "controller/net_controller.h"
 #include "game/game_state_type.h"

@@ -14,12 +14,12 @@
 #include "game/gui/theme.h"
 #include "utils/iterator.h"
 #include "utils/vec.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 
 typedef struct component component;
 
 typedef void (*component_render_cb)(component *c);                             ///< Render callback function type
-typedef bool (*component_event_cb)(component *c, SDL_Event *event);            ///< SDL event callback function type
+typedef bool (*component_event_cb)(component *c, omf_event *event);            ///< Platform event callback type
 typedef bool (*component_action_cb)(component *c, int action, int source);     ///< Action callback function type
 typedef void (*component_focus_cb)(component *c, bool focused);                ///< Focus change callback function type
 typedef void (*component_layout_cb)(component *c, int x, int y, int w, int h); ///< Layout callback function type
@@ -65,7 +65,7 @@ void component_render(component *c);
  * @param event SDL event to process
  * @return True if the event was consumed, false if not
  */
-bool component_event(component *c, SDL_Event *event);
+bool component_event(component *c, omf_event *event);
 
 /**
  * @brief Handle an abstract action event

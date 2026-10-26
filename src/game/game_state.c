@@ -36,7 +36,7 @@
 #include "video/enums.h"
 #include "video/vga_state.h"
 #include "video/video.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
@@ -554,7 +554,7 @@ void game_state_set_paused(game_state *gs, unsigned int paused) {
     gs->paused = paused;
 }
 
-bool game_state_handle_event(game_state *gs, SDL_Event *event) {
+bool game_state_handle_event(game_state *gs, omf_event *event) {
     if(event->type == SDL_KEYDOWN && is_demoplay(gs) && event->key.keysym.sym == SDLK_ESCAPE) {
         // ESC during demo mode jumps you back to the main menu
         game_state_set_next(gs, SCENE_MENU);

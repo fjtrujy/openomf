@@ -1,4 +1,4 @@
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -458,7 +458,7 @@ void mechlab_select_dashboard(scene *scene, dashboard_type type) {
     }
 }
 
-bool mechlab_event(scene *scene, SDL_Event *event) {
+bool mechlab_event(scene *scene, omf_event *event) {
     mechlab_local *local = scene_get_userdata(scene);
     game_player *player1 = game_state_get_player(scene->gs, 0);
     if(player1->ctrl->type == CTRL_TYPE_GAMEPAD ||

@@ -254,7 +254,7 @@ void lobby_print_match_settings(const int user_id, const match_settings *setting
     log_debug("}");
 }
 
-static bool lobby_event(scene *scene, SDL_Event *e) {
+static bool lobby_event(scene *scene, omf_event *e) {
     lobby_local *local = scene_get_userdata(scene);
     return gui_frame_event(local->frame, e);
 }

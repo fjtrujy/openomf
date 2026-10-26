@@ -9,7 +9,7 @@
 #include "utils/log.h"
 #include "video/vga_state.h"
 #include "video/video.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 
 // Colors specific to palette used by main menu
 #define TEXT_PRIMARY_COLOR 0xFE
@@ -53,7 +53,7 @@ void mainmenu_input_tick(scene *scene) {
     controller_free_chain(ev);
 }
 
-bool mainmenu_event(scene *scene, SDL_Event *event) {
+bool mainmenu_event(scene *scene, omf_event *event) {
     mainmenu_local *local = scene_get_userdata(scene);
     game_player *player1 = game_state_get_player(scene->gs, 0);
     if(player1->ctrl->type == CTRL_TYPE_GAMEPAD ||

@@ -6,7 +6,7 @@
 #include "video/enums.h"
 #include "video/vga_state.h"
 
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +41,7 @@ typedef struct {
     int fps_limit;
     uint32_t last_frame;
     unsigned framebuffer_options;
-    SDL_Rect offscreen_area;
+    omf_rect offscreen_area;
     video_screenshot_signal screenshot;
     bool fullscreen;
     bool vsync;
@@ -214,7 +214,7 @@ static void flush_state(software_context *ctx) {
     }
 }
 
-static void draw(void *data, const surface *src, SDL_Rect *rect, int remap_offset, int remap_rounds,
+static void draw(void *data, const surface *src, omf_rect *rect, int remap_offset, int remap_rounds,
                  int palette_offset, int palette_limit, int opacity, unsigned int flip, unsigned int options) {
     software_context *ctx = data;
     if(!src || !src->data || rect->w <= 0 || rect->h <= 0 || src->w <= 0 || src->h <= 0) return;
@@ -309,7 +309,7 @@ static void finish(void *data) {
             rgb[i * 3 + 1] = (ctx->pixels[i] >> 8) & 255;
             rgb[i * 3 + 2] = (ctx->pixels[i] >> 16) & 255;
         }
-        SDL_Rect rect = {0, 0, GAME_W, GAME_H};
+        omf_rect rect = {0, 0, GAME_W, GAME_H};
         ctx->screenshot(&rect, rgb, false);
         ctx->screenshot = NULL;
         omf_free(rgb);
@@ -318,7 +318,7 @@ static void finish(void *data) {
     SDL_UpdateTexture(ctx->texture, NULL, ctx->pixels, GAME_W * sizeof(uint32_t));
     SDL_SetRenderDrawColor(ctx->sdl, 0, 0, 0, 255);
     SDL_RenderClear(ctx->sdl);
-    SDL_Rect viewport = {0, 0, ctx->screen_w, ctx->screen_h};
+    omf_rect viewport = {0, 0, ctx->screen_w, ctx->screen_h};
     if(ctx->aspect == 0) {
         int fit_w = ctx->screen_h * 4 / 3;
         if(fit_w <= ctx->screen_w) {
@@ -341,7 +341,7 @@ static void finish(void *data) {
     ctx->last_frame = omf_time_ms32();
 }
 
-static void area_prepare(void *data, const SDL_Rect *area) {
+static void area_prepare(void *data, const omf_rect *area) {
     software_context *ctx = data;
     ctx->offscreen_area = *area;
     memset(ctx->framebuffer, 0, sizeof(ctx->framebuffer));
@@ -349,7 +349,7 @@ static void area_prepare(void *data, const SDL_Rect *area) {
 
 static void area_finish(void *data, surface *dst) {
     software_context *ctx = data;
-    const SDL_Rect *area = &ctx->offscreen_area;
+    const omf_rect *area = &ctx->offscreen_area;
     surface_create(dst, area->w, area->h);
     dst->transparent = -1;
     for(int y = 0; y < area->h; y++) {

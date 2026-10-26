@@ -1,6 +1,6 @@
 #include "utils/log.h"
 
-#include <SDL_mutex.h>
+#include "utils/platform_types.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>

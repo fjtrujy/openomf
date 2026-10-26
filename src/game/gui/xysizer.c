@@ -53,7 +53,7 @@ static void xysizer_layout(component *c, int x, int y, int w, int h) {
     }
 }
 
-static bool xysizer_event(component *c, SDL_Event *event) {
+static bool xysizer_event(component *c, omf_event *event) {
     // Just pass events to all children, stop if it gets handled.
     iterator it;
     component **tmp;

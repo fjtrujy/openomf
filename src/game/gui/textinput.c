@@ -1,4 +1,5 @@
-#include <SDL.h>
+#include "utils/platform_types.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -241,7 +242,7 @@ static bool is_valid_input(char c) {
     return isprint(c) && c != '@' && c != '~';
 }
 
-static bool textinput_event(component *c, SDL_Event *e) {
+static bool textinput_event(component *c, omf_event *e) {
     // Handle selection
     textinput *ti = component_get_obj(c);
     if((e->type == SDL_TEXTINPUT || e->type == SDL_KEYDOWN) && ti->last_source != CTRL_TYPE_KEYBOARD) {
@@ -259,7 +260,7 @@ static bool textinput_event(component *c, SDL_Event *e) {
         refresh(c);
         return true;
     } else if(e->type == SDL_KEYDOWN) {
-        const SDL_Scancode key = e->key.keysym.scancode;
+        const omf_scancode key = e->key.keysym.scancode;
         const bool ctrl_mod = (e->key.keysym.mod & KMOD_CTRL) != 0;
         if(key == SDL_SCANCODE_BACKSPACE) {
             if(ti->pos > 0) {

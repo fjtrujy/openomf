@@ -82,7 +82,7 @@ void gui_frame_render(gui_frame *frame);
  * @param event SDL event to process
  * @return True if the event was consumed, false if not
  */
-bool gui_frame_event(gui_frame *frame, SDL_Event *event);
+bool gui_frame_event(gui_frame *frame, omf_event *event);
 
 /**
  * @brief Handle an abstract action event

@@ -176,7 +176,7 @@ void scene_startup(scene *scene, int id, int *m_load, int *m_repeat) {
     }
 }
 
-bool scene_event(scene *scene, SDL_Event *event) {
+bool scene_event(scene *scene, omf_event *event) {
     if(scene->event != NULL) {
         return scene->event(scene, event);
     }

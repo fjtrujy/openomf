@@ -149,7 +149,7 @@ static void menu_render(component *c) {
     }
 }
 
-static bool menu_event(component *mc, SDL_Event *event) {
+static bool menu_event(component *mc, omf_event *event) {
     const menu *m = component_get_obj(mc);
 
     // If submenu is set, we need to use it

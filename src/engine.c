@@ -22,7 +22,7 @@
 #include "utils/time_fmt.h"
 #include "video/vga_state.h"
 #include "video/video.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <stdio.h>
 
 #define MAX_TICKS_PER_FRAME 10
@@ -118,7 +118,7 @@ exit_0:
     return 1;
 }
 
-void save_screenshot(const SDL_Rect *r, unsigned char *data, bool flip) {
+void save_screenshot(const omf_rect *r, unsigned char *data, bool flip) {
     char *time = format_time();
     path filename = get_screenshot_filename(time);
     if(write_rgb_png(&filename, r->w, r->h, data, false, flip)) {
@@ -152,7 +152,7 @@ void save_rec(game_state *gs) {
 
 void engine_run(const engine_init_flags *init_flags) {
 #ifndef PSP_NATIVE_INPUT
-    SDL_Event e;
+    omf_event e;
 #endif
     int visual_debugger = 0;
     int debugger_proceed = 0;

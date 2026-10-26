@@ -9,7 +9,7 @@
 #include <assert.h>
 #include <stdlib.h>
 
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <SDL_mixer.h>
 
 #ifdef __PSP__

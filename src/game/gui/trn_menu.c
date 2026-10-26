@@ -366,7 +366,7 @@ static void trnmenu_tick(component *c) {
     }
 }
 
-static bool trnmenu_event(component *mc, SDL_Event *event) {
+static bool trnmenu_event(component *mc, omf_event *event) {
     const trnmenu *m = component_get_obj(mc);
 
     // If submenu is set, we need to use it

@@ -5,7 +5,7 @@
 #include "game/gui/osd/osd.h"
 #include "utils/allocator.h"
 #include "utils/ringbuffer.h"
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <opusfile.h>
 #include <stdlib.h>
 
