@@ -10,8 +10,8 @@
  * sprite commands through the existing indexed compositing rules and submit
  * one RGBA image to GU. Offscreen capture also uses indexed compositing.
  *
- * This backend is independent of the SDL renderer: SDL handles window events,
- * sound, input and the controller. Only the PSP GU owns the video framebuffer.
+ * The PSP GU owns the framebuffer and display lifecycle. SDL_Rect remains a
+ * shared renderer interface type; a native PSP build needs no SDL window.
  */
 #include "video/renderers/psp/gu_renderer.h"
 
@@ -20,7 +20,9 @@
 #include "video/enums.h"
 #include "video/vga_state.h"
 
+#ifndef PSP_NATIVE_DISPLAY
 #include <SDL.h>
+#endif
 #include <malloc.h>
 #include <pspdisplay.h>
 #include "utils/platform_time.h"
@@ -81,7 +83,9 @@ typedef struct {
 } indexed_pixel;
 
 typedef struct {
+#ifndef PSP_NATIVE_DISPLAY
     SDL_Window *window;
+#endif
     int screen_w, screen_h, aspect, fb_scale, fps;
     int target_x, target_y;
     bool fullscreen, vsync, offscreen, needs_cpu;
@@ -175,12 +179,21 @@ static bool setup(void *userdata, int w, int h, bool fullscreen, bool vsync, int
     ctx->fps = fps;
     ctx->fb_scale = fb_scale;
     ctx->last_frame = omf_time_ms32();
+#ifdef PSP_NATIVE_DISPLAY
+    // Initialize the physical PSP display before configuring GU buffers.
+    // No SDL video driver or SDL window is needed on the native path.
+    if(sceDisplaySetMode(0, SCREEN_W, SCREEN_H) < 0) {
+        log_error("PSP GU: sceDisplaySetMode failed");
+        return false;
+    }
+#else
     ctx->window = SDL_CreateWindow("OpenOMF PSP GU", SDL_WINDOWPOS_UNDEFINED,
                                     SDL_WINDOWPOS_UNDEFINED, SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN);
     if(!ctx->window) {
         log_error("PSP GU window: %s", SDL_GetError());
         return false;
     }
+#endif
 
     sceGuInit();
     sceGuStart(GU_DIRECT, ctx->display_list);
@@ -205,7 +218,12 @@ static bool setup(void *userdata, int w, int h, bool fullscreen, bool vsync, int
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
     sceGuDisplay(GU_TRUE);
     vga_state_mark_dirty();
-    log_info("PSP GU hardware renderer initialized (%dx%d, indexed texture CLUT)", SCREEN_W, SCREEN_H);
+#ifdef PSP_NATIVE_DISPLAY
+    log_info("PSP GU hardware renderer initialized (%dx%d, native sceDisplay, no SDL window, indexed texture CLUT)",
+             SCREEN_W, SCREEN_H);
+#else
+    log_info("PSP GU hardware renderer initialized (%dx%d, SDL window, indexed texture CLUT)", SCREEN_W, SCREEN_H);
+#endif
     return true;
 }
 
@@ -236,8 +254,10 @@ static void close_context(void *userdata) {
     gu_context *ctx = userdata;
     sceGuDisplay(GU_FALSE);
     sceGuTerm();
+#ifndef PSP_NATIVE_DISPLAY
     if(ctx->window) SDL_DestroyWindow(ctx->window);
     ctx->window = NULL;
+#endif
 }
 
 static int next_pow2(int n) {

@@ -85,6 +85,10 @@ int main(int argc, char *argv[]) {
 
     memset(&init_flags, 0, sizeof(init_flags));
     init_flags.speed = -1;
+#if defined(__PSP__) && defined(PSP_TEST_SOFTWARE_RENDERER)
+    // Diagnostic build only: PSP's stub settings store no renderer preference.
+    strncpy_or_truncate(init_flags.force_renderer, "Software", sizeof(init_flags.force_renderer));
+#endif
 
 #if defined(USE_ARGTABLE)
     struct arg_lit *help = arg_lit0("h", "help", "print this help and exit");
@@ -280,8 +284,14 @@ int main(int argc, char *argv[]) {
         settings_get()->net.net_listen_port_start = listen_port;
     }
 
-    // Init SDL2
-    if(SDL_Init(SDL_INIT_TIMER | SDL_INIT_VIDEO)) {
+    // Native PSP GU owns its display. The optional SDL software renderer
+    // initializes SDL video lazily when explicitly selected.
+#if defined(__PSP__) && defined(PSP_NATIVE_DISPLAY)
+    const Uint32 sdl_subsystems = SDL_INIT_TIMER;
+#else
+    const Uint32 sdl_subsystems = SDL_INIT_TIMER | SDL_INIT_VIDEO;
+#endif
+    if(SDL_Init(sdl_subsystems)) {
         err_msgbox("SDL2 Initialization failed: %s", SDL_GetError());
         goto exit_2;
     }
@@ -289,6 +299,13 @@ int main(int argc, char *argv[]) {
     SDL_GetVersion(&sdl_linked);
     log_info("Found SDL v%d.%d.%d", sdl_linked.major, sdl_linked.minor, sdl_linked.patch);
     log_info("Running on platform: %s", SDL_GetPlatform());
+#if defined(__PSP__) && defined(PSP_NATIVE_DISPLAY)
+    if(SDL_WasInit(SDL_INIT_VIDEO)) {
+        log_warn("PSP native display: SDL video was unexpectedly initialized");
+    } else {
+        log_info("PSP native display: SDL video subsystem not initialized at startup");
+    }
+#endif
 
 #ifndef PSP_NATIVE_INPUT
     if(SDL_InitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)) {

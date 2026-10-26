@@ -71,6 +71,14 @@ static void destroy(renderer *r) {
 static bool setup(void *data, int width, int height, bool fullscreen, bool vsync, int aspect, int fps,
                   int fb_scale, int scaling_mode) {
     software_context *ctx = data;
+#if defined(__PSP__) && defined(PSP_NATIVE_DISPLAY)
+    // The native GU path leaves SDL video disabled; the legacy SDL software
+    // renderer still works when explicitly selected in game settings.
+    if(!(SDL_WasInit(SDL_INIT_VIDEO) & SDL_INIT_VIDEO) && SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
+        log_error("SDL software video initialization failed: %s", SDL_GetError());
+        return false;
+    }
+#endif
 #ifdef __PSP__
     width = 480;
     height = 272;
