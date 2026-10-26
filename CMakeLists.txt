@@ -176,6 +176,10 @@ file(GLOB_RECURSE OPENOMF_SRC
     "src/*/*.c" "src/*/*.h"
 )
 
+# PSP's sceCtrl implementation is selected by ports/psp/CMakeLists.txt;
+# the desktop build must not compile target-only SDK sources.
+list(FILTER OPENOMF_SRC EXCLUDE REGEX "^src/controller/psp_joystick\\.[ch]$")
+
 # Remove all player plugin source code from OPENOMF_SRC
 list(FILTER OPENOMF_SRC EXCLUDE REGEX "^src/audio/backends/.*/")
 # Enable "NULL" player in debug builds, for automated testing
