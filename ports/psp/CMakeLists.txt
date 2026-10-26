@@ -15,6 +15,8 @@ set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 option(PSP_GU_PROFILE "Log native GU GPU/CPU-effect frame counts every 600 frames" OFF)
 option(PSP_CLOCK_333 "Use PSP's supported 333 MHz CPU clock for full-speed gameplay (restored at exit)" ON)
+option(PSP_NATIVE_AUDIO "Use the native sceAudio backend (no SDL_mixer dependency by default)" ON)
+option(PSP_SDL_AUDIO_FALLBACK "Also compile SDL_mixer as an alternate PSP audio backend" OFF)
 option(PSP_STRESS_DEMO "Start AI-vs-AI arena stress test for profiling (never enable in a shipping build)" OFF)
 set(PSP_STRESS_ARENA 0 CACHE STRING "Arena 0..4 for the 120s PSP stress test")
 if(NOT PSP_STRESS_ARENA MATCHES "^[0-4]$")
@@ -27,10 +29,15 @@ list(FILTER OMF_CORE EXCLUDE REGEX "/src/audio/backends/")
 list(FILTER OMF_CORE EXCLUDE REGEX "/src/video/renderers/")
 list(FILTER OMF_CORE EXCLUDE REGEX "/src/vendored/(argtable|zip)/")
 list(APPEND OMF_CORE
-    "${OMF_ROOT}/src/audio/backends/sdl/sdl_backend.c"
     "${OMF_ROOT}/src/video/renderers/software/software_renderer.c"
     "${OMF_ROOT}/src/video/renderers/psp/gu_renderer.c"
 )
+if(PSP_NATIVE_AUDIO)
+    list(APPEND OMF_CORE "${OMF_ROOT}/src/audio/backends/psp/psp_backend.c")
+endif()
+if(NOT PSP_NATIVE_AUDIO OR PSP_SDL_AUDIO_FALLBACK)
+    list(APPEND OMF_CORE "${OMF_ROOT}/src/audio/backends/sdl/sdl_backend.c")
+endif()
 
 add_executable(openomf_psp
     "${OMF_ROOT}/src/main.c"
@@ -65,7 +72,6 @@ target_compile_options(openomf_psp PRIVATE "-I${PSPDEV}/psp/sdk/include")
 target_compile_definitions(openomf_psp PRIVATE
     ENABLE_PSP_GU_RENDERER
     ENABLE_SOFTWARE_RENDERER
-    ENABLE_SDL_AUDIO_BACKEND
     PNG_FOUND
     V_MAJOR=0 V_MINOR=0 V_PATCH=0 V_LABEL="PSP"
 )
@@ -74,6 +80,12 @@ if(PSP_GU_PROFILE)
 endif()
 if(PSP_CLOCK_333)
     target_compile_definitions(openomf_psp PRIVATE PSP_CLOCK_333)
+endif()
+if(PSP_NATIVE_AUDIO)
+    target_compile_definitions(openomf_psp PRIVATE ENABLE_PSP_AUDIO_BACKEND)
+endif()
+if(NOT PSP_NATIVE_AUDIO OR PSP_SDL_AUDIO_FALLBACK)
+    target_compile_definitions(openomf_psp PRIVATE ENABLE_SDL_AUDIO_BACKEND)
 endif()
 if(PSP_GU_APPROX_EFFECTS)
     target_compile_definitions(openomf_psp PRIVATE PSP_GU_APPROX_EFFECTS)
@@ -84,8 +96,13 @@ if(PSP_STRESS_DEMO)
 endif()
 
 # SDL2's PSP backend uses the GU for display; no OpenGL 3.3 or libepoxy.
+# With static archives, SDL_mixer must precede its dependencies at link time.
+set(PSP_AUDIO_LIBRARIES "")
+if(NOT PSP_NATIVE_AUDIO OR PSP_SDL_AUDIO_FALLBACK)
+    list(APPEND PSP_AUDIO_LIBRARIES SDL2_mixer)
+endif()
 target_link_libraries(openomf_psp PRIVATE
-    SDL2_mixer SDL2main SDL2 xmp enet
+    ${PSP_AUDIO_LIBRARIES} SDL2main SDL2 xmp enet
     png16
     GL pspvram pspvfpu psphprm
     vorbisfile vorbis ogg modplug stdc++

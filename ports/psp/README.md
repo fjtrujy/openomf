@@ -1,8 +1,11 @@
 # OpenOMF PSP port
 
 This port compiles OpenOMF's original C game engine using the PSPSDK, with
-**native PSP GU sprite rendering**, SDL2 controller/input, SDL_mixer sound and
-libxmp/PSM music. It is independent of the desktop OpenGL/epoxy CMake build.
+**native PSP GU sprite rendering**, **native PSP sceAudio mixing**, SDL2
+controller/input, and libxmp/PSM music. It is independent of the desktop
+OpenGL/epoxy CMake build. SDL2 is still used for engine events, timing,
+input, window setup and utilities, but the default PSP build does not
+compile or link SDL_mixer.
 
 ## Build and install
 
@@ -66,14 +69,61 @@ That variant replays destination-index effects in a CPU framebuffer and is
 available as a fallback; the normal menu/game path defaults to `PSP GU`.
 The 320x200 game is scaled into the 480x272 PSP screen.
 
-### Audio improvements
+### Native PSP audio
 
-The original sound samples are unsigned 8-bit PCM. The PSP backend now
-resamples them directly to S16 mono/stereo with fixed-point linear interpolation,
-avoiding a very expensive general-purpose SDL format conversion on each sound
-event. Converted pitched samples are also shared through a bounded 4 MiB PCM
-cache. Both optimizations are guarded with `__PSP__`; desktop audio retains
-its existing path.
+`PSP_NATIVE_AUDIO=ON` (default) uses the native `sceAudio` hardware API
+instead of SDL_mixer. A dedicated PSP audio thread combines three sound-effect
+channels with streamed PSM music from **libxmp** into a single stereo 16-bit
+44.1 kHz buffer. It supports sound priorities (handled by the existing
+engine), per-channel volume, pitch, pan, fades, music playback and stopping.
+The mixer synchronizes its audio callback and sample lifetimes with a PSP
+semaphore, and releases owned PCM once playback finishes.
+
+SOUNDS.DAT samples are unsigned 8-bit mono. Fixed-point resampling converts
+each source and pitch to 44.1 kHz mono PCM, with a bounded 4 MiB converted
+sample cache. Using mono rather than duplicated stereo buffers reduces memory
+use. The PSP audio channel is inherently stereo, so this backend outputs
+stereo even if the user's setting requests mono. PSP music and effects still
+mix together, with no dependency on SDL_mixer.
+
+Both alternative build configurations remain supported:
+
+```sh
+# Restore the original SDL_mixer implementation for A/B testing.
+psp-cmake -S ports/psp -B build/psp-sdl-audio -G Ninja \
+  -DPSP_NATIVE_AUDIO=OFF
+
+# Include both: native by default, SDL_mixer selectable by audio-backend name.
+psp-cmake -S ports/psp -B build/psp-dual-audio -G Ninja \
+  -DPSP_NATIVE_AUDIO=ON -DPSP_SDL_AUDIO_FALLBACK=ON
+```
+
+Both variants keep the desktop audio implementation unchanged. Full SDL2
+removal from PSP is a separate task, since the engine's controller, window,
+event, timer, logging and GUI code still refer to SDL2.
+
+#### Native audio benchmark (real PSP, October 26, 2026)
+
+Separate 120-second Arena 4 PSPLink/HostFS runs at 333 MHz CPU / 166 MHz bus.
+The five-second FPS windows include scene setup, and the AI fights are
+randomized, so these results are **not deterministic CPU-isolated benchmarks**:
+
+| PSP audio configuration | Average FPS | PCM cache at exit | Audio errors |
+| --- | ---: | ---: | ---: |
+| SDL_mixer control (48 kHz stereo) | 57.97 | 3,396 KiB | No errors reported |
+| Native sceAudio, initial mixer | 56.94 | 1,821 KiB | 0 |
+| Native sceAudio, optimized gains | 58.02 | 1,355 KiB | 0 |
+| Native sceAudio, SDL_mixer omitted from linking | 57.77 | 1,298 KiB | 0 |
+
+The optimized run rendered 10,005 music blocks and 6,813 blocks containing
+sound effects; 952 effects were started. A further 120-second native-only
+hardware run completed without an exception after removing SDL_mixer
+from the linker, recording 10,006 music blocks, 6,462 effect-active blocks
+and 688 effect starts, with zero audio output errors. All runs exited cleanly, with no
+PSPLink exceptions. The speed difference is within normal combat variability;
+the clearest benefits are reduced middleware dependency and lower PCM memory.
+Removing SDL_mixer from the default native build also reduced `EBOOT.PBP`
+from 3,734,636 to 2,877,576 bytes (about 23%).
 
 ## Repeatable gameplay stress tests
 
