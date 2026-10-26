@@ -19,6 +19,10 @@
 #include <string.h>
 #include <time.h>
 
+#if defined(__PSP__) && defined(PSP_CLOCK_333)
+#include <psppower.h>
+#endif
+
 #if defined(USE_ARGTABLE)
 #include <argtable3.h>
 #endif
@@ -56,6 +60,17 @@ void scan_game_controllers(void) {
 }
 
 int main(int argc, char *argv[]) {
+#if defined(__PSP__) && defined(PSP_CLOCK_333)
+    // The PSP boots at 222 MHz on some firmwares. Native combat needs the
+    // supported 333 MHz clock to approach 60 FPS; restore prior settings
+    // before returning to the launcher's clock policy.
+    const int prior_cpu = scePowerGetCpuClockFrequencyInt();
+    const int prior_bus = scePowerGetBusClockFrequencyInt();
+    // PSPSDK exposes CPU and bus getters but no PLL getter. Reconstruct a
+    // valid PLL for the previous clocks (CPU <= PLL and 2 * bus <= PLL).
+    const int prior_pll = prior_cpu > 2 * prior_bus ? prior_cpu : 2 * prior_bus;
+    bool changed_clock = false;
+#endif
     // Set up initial state for misc things
     char *ip = NULL;
     char *lobbyaddr = NULL;
@@ -213,6 +228,15 @@ int main(int argc, char *argv[]) {
     if(strlen(git_sha1_hash) > 0) {
         log_info("Git SHA1 hash: %s", git_sha1_hash);
     }
+#if defined(__PSP__) && defined(PSP_CLOCK_333)
+    if(scePowerSetClockFrequency(333, 333, 166) >= 0) {
+        changed_clock = true;
+        log_info("PSP clock: CPU 333 MHz, bus 166 MHz (previous CPU %d MHz, bus %d MHz)",
+                 prior_cpu, prior_bus);
+    } else {
+        log_warn("Unable to select PSP 333 MHz clock; retaining current clock");
+    }
+#endif
 
     // Random seed
     rand_seed(time(NULL));
@@ -311,6 +335,11 @@ exit_1:
     log_info("Exit.");
     log_close();
 exit_0:
+#if defined(__PSP__) && defined(PSP_CLOCK_333)
+    if(changed_clock) {
+        scePowerSetClockFrequency(prior_pll, prior_cpu, prior_bus);
+    }
+#endif
     if(ip) {
         omf_free(ip);
     }

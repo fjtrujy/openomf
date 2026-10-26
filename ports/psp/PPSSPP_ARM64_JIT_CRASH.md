@@ -1,9 +1,67 @@
 # PPSSPP ARM64 fast-memory JIT crash: OpenOMF PSP
 
-Investigation status: **reproducible host crash; root cause not established**.
-Test date: 2026-10-25. Branch: `new_psp`. Host: Apple Silicon macOS;
+Investigation status: **a matching real-PSP null-derived pointer bug was found
+and corrected in OpenOMF**. The corrected game completed three 120-second
+strict-fast-memory classic-JIT regressions with no new crash. The exact
+generated native ARM64 instruction in the earlier host crash is not known,
+so this is strong evidence for a shared root cause rather than a formally
+isolated JIT-instruction diagnosis.
+Original PPSSPP test date: 2026-10-25. Hardware investigation: 2026-10-26.
+Branch: `new_psp`. Host: Apple Silicon macOS;
 PPSSPP SDL **v1.20.4**, ARM64. Test binary: optimized PSP EBOOT built with
 PSPSDK and native PSP GU rendering.
+
+## Real PSP discovery and likely root cause (October 26, 2026)
+
+Running the same 120-second Arena 4 stress scenario on a physical PSP
+(firmware 6.61, CPU 222 MHz) through PSPLink reproduced a **real guest-side
+bus error** at roughly 40 seconds. PSPLink captured:
+
+```text
+Exception: Bus error (data), thread user_main, module SDL App
+EPC       0x08866F64 (module offset 0x00062F64)
+a0        0x0000002C
+ra        0x0883CECC
+BadVAddr  0x363FE1F3
+```
+
+Mapping the exact unstripped PSP PRX ELF:
+
+```asm
+00062f64 <array_get>:
+  lw     v0, 0(a0)  # a0 = 0x2c, invalid array pointer
+```
+
+The return address identifies `player_run_apply()`, specifically an
+`af_get_move()` call for the `TAG_UA` damage-animation command.
+`af_get_move()` tail-calls `array_get(&a->moves, id)`, where `moves`
+begins at offset `0x2c` within `af`. A NULL `af *` therefore becomes
+the exact invalid array pointer `0x2c`.
+
+**Game-code error:** `TAG_UA` unconditionally interpreted the current
+object's userdata as `har`, but both HARs and projectiles can carry UA.
+`projectile_local` has a different layout: the incorrectly interpreted
+`har->af_data` field could read a projectile's `wall_bounce` field
+instead of an AF pointer. The fix selects `har->af_data` for HARs and
+`projectile_get_af_data()` for projectiles, validates the source and
+target moves, and avoids dereferencing missing animation data.
+
+The physical PSP subsequently completed three full 120-second arena tests
+without another exception: at 222 MHz, manually selected 333 MHz, and
+automatic 333 MHz. After the source fix, **two strict fast-memory
+classic-JIT runs in Arena 4 each passed at 59.2 FPS average**, and
+**Arena 2 passed at 59.0 FPS average**. No new macOS crash reports were
+generated. Longer repetitions are still valuable because the original
+crash was intermittent.
+
+The PSP's invalid `0x0000002c` matches the low address portion of the
+earlier PPSSPP host fault `0x000000030000002c`. This is a **much stronger
+explanation than a previously hypothesized ARM64 cached-pointer compiler
+defect**. PPSSPP's cached-pointer setting changed whether the invalid
+access caused an obvious host crash, but did not establish that PPSSPP
+generated incorrect guest logic. The BadVAddr field above is not itself
+equal to `0x2c`; the register and exact faulting instruction provide
+the actionable evidence.
 
 ## Symptom and reproduction
 
@@ -17,7 +75,7 @@ ports/psp/run-stress.sh 4 strict-fast-jit
 
 `strict-fast-jit` sets `FastMemoryAccess=True` and
 `IgnoreBadMemAccess=False`, and selects PPSSPP's classic JIT (`-j`).
-The host emulator intermittently terminates during combat, sometimes within
+Before the game-code fix, the host emulator intermittently terminated during combat, sometimes within
 5–25 seconds, before OpenOMF can log orderly shutdown. Several Arena 2 runs
 crashed later (approximately 55–90 seconds).
 
@@ -49,12 +107,11 @@ offending guest instruction.
 | Classic ARM64 JIT, `JitDisableFlags=0x01000000` (disable cached native pointers) | ON | **Passed twice** in 120s Arena 4 and once in 120s Arena 2, including natural scene transitions and clean shutdown |
 
 Disabling only the cached-native-pointer optimization, while leaving fast
-memory enabled, removes the observed failures in the tested runs. The
-**leading suspect is the classic ARM64 JIT's cached-pointer load/store
-translation**, not a general PSP graphics-driver fault. This is strong
-causal evidence from configuration isolation, but it is not yet an
-instruction-level confirmation of the bug. Intermittent guest bugs or
-timing-sensitive failures cannot be excluded solely by finite successful runs.
+memory enabled, removed the observed failures in the tested pre-fix runs.
+At the time, the **classic ARM64 JIT's cached-pointer load/store translation**
+was our leading suspect. The subsequent real-PSP exception demonstrates
+a genuine OpenOMF bug which better explains these observations. Successful
+workarounds are not proof of a JIT miscompile.
 
 ### Specific PPSSPP source path
 
@@ -155,7 +212,7 @@ Relevant PPSSPP implementation:
 `Core/MIPS/ARM64/Arm64Jit.cpp` (`JitMemCheck`,
 `Arm64Jit::CheckMemoryBreakpoint`).
 
-## Other bugs excluded
+## Other investigated issues
 
 The game's old stdin polling issued `BADF=sceIoRead(0, ...)` repeatedly.
 It has already been disabled for PSP builds. The errors disappeared, but
@@ -171,12 +228,15 @@ crash-prone 120s automation uses the native GU hardware renderer.
    the crash. The built-in `memory.breakpoint.add` hit on guest `0x2c`
    cannot substitute for this because its effective-address reports are
    inconsistent with the captured guest-register snapshots.
-2. Audit the classic ARM64 JIT's `MapRegAsPointer` register-lifetime
-   tracking and fast path for small positive offsets; compare with JIT-IR
-   and capture an actual native register state at the fault.
-3. If the bug remains on real PSP hardware, collect a PSPLink exception
-   dump before assuming the emulator is responsible. Real-hardware
-   validation is currently unavailable (USB PSP not detected).
+2. Extend post-fix classic-JIT + strict-fast-memory Arena 2 and 4 runs
+   beyond the three successful two-minute regressions. If the host crash
+   remains reproducible, then audit
+   `MapRegAsPointer` register-lifetime tracking and capture an actual
+   native register state at the fault.
+3. Continue PSPLink physical-hardware testing: the original real PSP
+   exception is now captured and the first three post-fix 120-second
+   tests passed, but the full human-controlled campaign and Memory Stick
+   XMB launch have not been validated yet.
 4. Minimize the reproduction to a PSP GU-only test if the failing PC
    is ultimately shown to lie in `sceGuSwapBuffers`.
 

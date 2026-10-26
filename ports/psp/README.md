@@ -31,10 +31,15 @@ with the original `ENGLISH.DAT` in the freeware assets.
 `PSP/GAME/` folder and launch `EBOOT.PBP` through the emulator.
 
 **Physical PSP**: copy it to the Memory Stick, launch from the XMB, and check
-`save/openomf.log`. The current port has been tested in PPSSPP, **not yet on
-the connected physical PSP**; the PSPLink USB connection was unavailable for
-the latest hardware test. Performance, sound and memory usage require separate
-validation on hardware.
+`save/openomf.log`. The native GU renderer has also completed three
+120-second AI-versus-AI combat tests on a real PSP running firmware 6.61
+through PSPLink/HostFS (see results below). The packaged XMB launch and
+full human-controlled campaign still need separate validation.
+
+On PSP hardware, `PSP_CLOCK_333=ON` (default) selects the PSP's supported
+333 MHz CPU / 166 MHz bus clock for near-60-FPS combat, restoring the
+previous CPU and bus clocks on normal exit. Higher clocks consume more
+power; rebuild with `-DPSP_CLOCK_333=OFF` to respect the launcher's clocks.
 
 ## Rendering architecture
 
@@ -105,7 +110,50 @@ The runner reports frame-window statistics, checks that the engine shuts
 down successfully, and treats dropped GU draw commands or emulator crashes
 as failures. It keeps emulator output under `build/psp-stress-arenaN/`.
 
-### PPSSPP results (October 25, 2026)
+### Physical PSP results (October 26, 2026)
+
+The PSPLink USB console is running firmware 6.61, with native
+480x272 GU rendering and a real SDL_mixer audio device. For hardware tests,
+configure a dedicated `build/psp-hardware` with `-DBUILD_PRX=ON`,
+`-DPSP_STRESS_DEMO=ON`, `-DPSP_STRESS_ARENA=4` and
+`-DPSP_GU_PROFILE=ON`. Put the complete `resources/` directory beside
+`openomf_psp.prx`. With HostFS mounted at the user's home directory, use
+`pspsh` to change to the PRX's `host0:/` directory before `ldstart
+openomf_psp.prx`. The game writes logs to `save/openomf.log`.
+
+| PSP clock | 120s stress result | Average of 23 5s FPS windows | Minimum window |
+| --- | --- | ---: | ---: |
+| 222 MHz CPU / 111 MHz bus | PASS | 43.76 | 38.0 |
+| 333 MHz CPU / 166 MHz bus (PSPLink setting) | PASS | 56.31 | 46.0 |
+| 333 MHz CPU / 166 MHz bus (automatic `PSP_CLOCK_333`) | PASS | 56.57 | 48.5 |
+
+All three tests completed with natural scene transitions and clean engine
+shutdown. The first used the default 222 MHz clock; the second was clocked
+to 333 MHz through PSPLink. The third verified automatic 222-to-333 MHz
+switching and restoration to 222 MHz at
+exit. FPS minimums include scene setup and transitions; single scene-loading
+frames still take around 0.8-1.1 seconds via HostFS. The native GPU rendered
+almost every frame: zero CPU-effect fallback frames in the first and third
+runs; the manually clocked 333 MHz run logged one remap/shadow CPU fallback.
+PSP GU texture storage remained
+within its 4 MiB limit and the converted audio cache finished within its
+4 MiB limit.
+
+**Real-hardware crash found and corrected:** before the fix, combat raised a
+PSPLink data bus error at `0x08866F64`, `array_get()`, with the array
+pointer at `0x2c` after about 40 seconds. The caller is the `TAG_UA`
+damage-animation path in `player_run_apply()`, which treated projectile
+userdata as `har` userdata despite their different layouts. It now
+resolves the animation file from the correct object type and validates both
+source and target move data. Three subsequent 120-second hardware runs
+reported no exceptions. This is a compelling explanation for PPSSPP's
+older host fault at `0x30000002c`: after the fix, the previously crashing
+classic JIT with strict fast-memory checks also completed **two 120-second
+Arena 4 tests (59.2 FPS average each)** and **one 120-second Arena 2
+test (59.0 FPS average)** without crashing. Longer playthroughs remain
+necessary before declaring every gameplay path stable.
+
+### PPSSPP results (October 25–26, 2026)
 
 * The initial SDL software renderer started OpenOMF, but full combat was
   approximately 19–21 FPS while the menu was around 47 FPS.
@@ -161,7 +209,7 @@ as failures. It keeps emulator output under `build/psp-stress-arenaN/`.
   **59.2 FPS** over 23 windows (minimum 52.9); Arena 4 averaged **59.2 FPS**
   (minimum 53.7). Both minimums include scene-loading intervals. This is
   emulator testing only; physical PSP performance is unverified.
-* Further ARM64 PPSSPP 1.20.4 isolation tests narrowed the intermittent
+* Before the real-hardware `TAG_UA` fix, ARM64 PPSSPP 1.20.4 isolation tests narrowed the intermittent
   fast-memory crash to the classic JIT's optimized load/store handling.
   Disabling only cached guest-to-host pointers
   (`JitDisableFlags=0x01000000`) completed **two full Arena 4 stress tests**
@@ -171,10 +219,18 @@ as failures. It keeps emulator output under `build/psp-stress-arenaN/`.
   register-flush mode still crashed at the original host fault address.
   The PPSSPP WebSocket debugger captured candidate guest memory breakpoints,
   but both reported addresses conflicted with the paused register snapshots.
-  The exact faulty guest/native instruction has **not** been proven.
+  The PSPLink exception now establishes a genuine guest-side null-derived
+  animation pointer bug; the earlier PPSSPP crash might share that cause.
+  The exact faulty guest/native instruction in the emulator has not been
+  independently captured.
+* **After fixing `TAG_UA` source-type dispatch**, PPSSPP classic JIT
+  (`-j`), `FastMemoryAccess=True`, `IgnoreBadMemAccess=False` completed
+  three fresh 120-second tests across Arenas 4 and 2. No new macOS crash
+  reports were generated. This supports a game-side root cause much more
+  strongly than the old cached-pointer JIT-miscompile hypothesis.
   See [PPSSPP ARM64 JIT crash investigation](PPSSPP_ARM64_JIT_CRASH.md).
 
-### PPSSPP JIT crash workaround (macOS)
+### PPSSPP JIT diagnostics and historical workaround (macOS)
 
 Use the bundled configuration override with JIT while testing OpenOMF:
 
@@ -187,8 +243,10 @@ Use the bundled configuration override with JIT while testing OpenOMF:
 This disables PPSSPP's aggressive fast guest-memory path for the session
 **without hiding invalid memory accesses**, and
 **does not edit your global PPSSPP settings**. The fallback `-i` interpreter
-also completed testing. A guest null-pointer bug remains a possibility, so
-the underlying crash and real-PSP behavior still need investigation.
+also completed testing. Before the projectile/HAR userdata fix, this
+was the conservative testing workaround. The corrected game now also passes
+the tested strict fast-memory classic-JIT scenarios, so the workaround
+is not necessary for those particular post-fix tests.
 
 For a **narrower emulator workaround** that keeps classic JIT and fast
 memory enabled while disabling the suspected cached-pointer optimization:
@@ -202,10 +260,10 @@ It uses `ports/psp/ppsspp-no-pointer-cache.ini`. Alternatively,
 with fast memory enabled. These are testing configurations, not changes to
 the PSP EBOOT or proof of long-term physical-hardware stability.
 
-For crash diagnosis, `run-stress.sh 2 strict-fast-jit` uses the bundled
+For regression diagnosis, `run-stress.sh 2 strict-fast-jit` uses the bundled
 `ppsspp-fastmem-strict.ini`, which enables fast memory but disables ignoring
-bad reads. This mode is **not a recommended workaround**: Arena 4 still
-reproduces the host crash. Attempts to attach LLDB to PPSSPP were denied by
+bad reads. Earlier OpenOMF builds crashed in this mode; the corrected
+build completed three Arena 2/4 test runs. Attempts to attach LLDB to PPSSPP were denied by
 macOS debugserver permissions; recovering the PSP guest PC requires a
 debugger-enabled environment or native PSPLink exception trace. The test
 runner resets emulator logs before each run and rejects new invalid stdin
@@ -219,11 +277,11 @@ builds and should never be shipped to users.
 
 * Verify complete five-arena playthroughs and sound quality/sync on a physical
   PSP, including PSP-1000 memory restrictions if that console is targeted.
-* Investigate the intermittent macOS PPSSPP fast-memory classic JIT crashes:
-  identify the precise native load/store or pointer-cache lifetime error
-  with a debugger-enabled PPSSPP. The crash persisted after AI guards and
-  the PSP stdin fix, but has not reproduced during the tested runs with the
-  cached-pointer optimization disabled. See the investigation report.
+* Continue long-run regression testing of the corrected projectile/HAR
+  `TAG_UA` handling on PSP and classic ARM64 PPSSPP JIT. The old host
+  fault has not reproduced after the fix in three strict fast-memory runs,
+  but its exact generated ARM64 instruction remains unconfirmed. See
+  the investigation report.
 * Quantify long-term texture/PCM cache churn, dropped allocations and rare
   CPU-effect fallbacks under special moves and credits.
 * Compare visual results against desktop OpenGL screenshots, particularly
