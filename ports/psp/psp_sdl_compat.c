@@ -4,10 +4,10 @@
  * are inert because PSP input comes solely from sceCtrl; net traces and
  * logging use normal files and PSP kernel synchronization.
  *
- * The remaining SDL type names in common interfaces will be removed in a
- * separate source-level API cleanup; they do not require the SDL2 runtime.
+ * Shared interfaces now use OpenOMF-owned types. Only these transitional
+ * SDL-named utility implementations remain for PSP-only legacy call sites.
  */
-#include <SDL.h>
+#include "utils/platform_types.h"
 #include <pspthreadman.h>
 #include <stdio.h>
 #include <stdlib.h>

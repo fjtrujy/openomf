@@ -6,9 +6,9 @@ This port compiles OpenOMF's original C game engine using the PSPSDK, with
 libxmp/PSM music. It is independent of the desktop OpenGL/epoxy CMake
 build. The native PSP GU renderer uses `sceDisplay` directly and the
 default `PSP_STANDALONE=ON` build **does not link SDL2, SDL2main or
-SDL2_mixer**. OpenOMF still uses some SDL-named common data types and
-helpers in source; these are provided by a small PSP-only compatibility
-layer rather than the SDL runtime.
+SDL2_mixer**. Shared geometry, event, and scancode interfaces use OpenOMF
+types; a small PSP-only compatibility layer implements remaining SDL-named
+utility helpers without SDL headers or runtime libraries.
 
 ## Build and install
 
@@ -77,7 +77,7 @@ HOME exit) restores the previous CPU/bus clock.
 
 #### SDL2-free build validation (October 26, 2026)
 
-The default PSP EBOOT is **1,764,508 bytes** without linking any of
+The default PSP EBOOT is **1,764,476 bytes** without linking any of
 `SDL2`, `SDL2main`, or `SDL2_mixer`. The equivalent legacy SDL-linked
 build is **2,873,608 bytes** (standalone is about 39% smaller).
 PSPLink/HostFS and PPSSPP both loaded resources, initialized
@@ -116,6 +116,14 @@ reported zero PSPLink exceptions and audio output errors and restored
 222 MHz on normal shutdown. Host C syntax checks of selected shared
 modules also passed; a complete desktop build remains unavailable on
 this Mac without SDL2_mixer.
+
+A further standalone PPSSPP strict-fast-JIT regression run on October 26
+completed Arena 4 for 120 seconds with **59.2 FPS** (native GU) and
+**29.75 FPS** (forced indexed CPU `Software` renderer), averaged over
+23 reporting windows each. Both runs reached normal engine shutdown,
+reported zero native-audio output errors and no emulator memory faults.
+The forced software run reported `GPU=0` and thousands of CPU-effect
+frames, confirming that combat was not silently routed through GPU sprites.
 
 Original One Must Fall 2097 data are not in git. `package.sh` downloads the
 freeware data archive from `www.omf2097.com` if no archive is present. You can
@@ -166,14 +174,15 @@ The 320x200 game is scaled into the 480x272 PSP screen.
 ### Native PSP display lifecycle
 
 `PSP_NATIVE_DISPLAY=ON` (default) calls `sceDisplaySetMode()` before
-configuring the PSP GU draw and display buffers. The main function starts
-SDL without its video subsystem, and GU initialization no longer creates
-an SDL window. Presentation still uses PSP VBlank synchronization and
-`sceGuSwapBuffers()`; normal shutdown disables and terminates the GU.
+configuring the PSP GU draw and display buffers. With `PSP_STANDALONE=ON`,
+startup does not call `SDL_Init()` or create an SDL window. Presentation
+uses PSP VBlank synchronization and `sceGuSwapBuffers()`; normal shutdown
+disables and terminates the GU. The optional SDL-linked PSP build retains
+SDL initialization without the video subsystem for this display mode.
 
-The desktop implementation is unchanged. On the PSP standalone build,
-shared `SDL_Rect` types remain in source, but the PSP compatibility
-layer supplies the limited legacy helpers without linking SDL2.
+The desktop implementation is unchanged. Shared renderer interfaces use
+`omf_rect` (an alias of `SDL_Rect` for SDL builds), while standalone PSP
+defines its own rectangle type without importing SDL headers.
 
 The previous PSP SDL video/window path remains selectable:
 
