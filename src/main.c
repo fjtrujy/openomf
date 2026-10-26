@@ -33,6 +33,7 @@ static const char *git_sha1_hash = "";
 static const char *git_sha1_hash = SHA1_HASH;
 #endif
 
+#ifndef PSP_NATIVE_INPUT
 void scan_game_controllers(void) {
     log_info("Found %d joysticks attached", SDL_NumJoysticks());
     SDL_Joystick *joy;
@@ -58,6 +59,7 @@ void scan_game_controllers(void) {
         }
     }
 }
+#endif
 
 int main(int argc, char *argv[]) {
 #if defined(__PSP__) && defined(PSP_CLOCK_333)
@@ -288,6 +290,7 @@ int main(int argc, char *argv[]) {
     log_info("Found SDL v%d.%d.%d", sdl_linked.major, sdl_linked.minor, sdl_linked.patch);
     log_info("Running on platform: %s", SDL_GetPlatform());
 
+#ifndef PSP_NATIVE_INPUT
     if(SDL_InitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER)) {
         err_msgbox("Joystick initialization failed: %s", SDL_GetError());
         goto exit_2;
@@ -301,6 +304,9 @@ int main(int argc, char *argv[]) {
     // Load game controller support
     joystick_load_external_mappings();
     scan_game_controllers();
+#else
+    log_info("PSP native input: SDL joystick, GameController and haptic services disabled");
+#endif
 
     // Init enet
     if(enet_initialize() != 0) {

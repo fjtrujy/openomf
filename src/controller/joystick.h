@@ -33,5 +33,8 @@ void joystick_close(void);
 void joystick_menu_poll_all(controller *menu_ctrl, ctrl_event **ev);
 void joystick_deviceadded(int sdl_joystick_index);
 void joystick_deviceremoved(int sdl_joystick_instance_id);
+#ifdef PSP_NATIVE_INPUT
+const char *joystick_device_name(int id);
+#endif
 
 #endif // JOYSTICK_H

@@ -150,13 +150,17 @@ void save_rec(game_state *gs) {
 }
 
 void engine_run(const engine_init_flags *init_flags) {
+#ifndef PSP_NATIVE_INPUT
     SDL_Event e;
+#endif
     int visual_debugger = 0;
     int debugger_proceed = 0;
     int debugger_render = 0;
 
+#ifndef PSP_NATIVE_INPUT
     // if mouse_visible_ticks <= 0, hide mouse
     uint64_t mouse_visible_ticks = 1000;
+#endif
 
     log_info(" --- BEGIN GAME LOG ---");
 
@@ -168,11 +172,13 @@ void engine_run(const engine_init_flags *init_flags) {
     }
     while(start_timeout > 0) {
         start_timeout--;
+#ifndef PSP_NATIVE_INPUT
         while(SDL_PollEvent(&e)) {
             if(e.type == SDL_QUIT) {
                 return;
             }
         }
+#endif
         unsigned framebuffer_options = 0;
         video_render_prepare(framebuffer_options);
         video_render_finish();
@@ -232,6 +238,7 @@ void engine_run(const engine_init_flags *init_flags) {
         }
 #endif
         // Handle events
+#ifndef PSP_NATIVE_INPUT
         bool check_fs;
         while(SDL_PollEvent(&e)) {
             // Handle other events
@@ -352,14 +359,17 @@ void engine_run(const engine_init_flags *init_flags) {
                 game_state_handle_event(gs, &e);
             }
         }
+#endif
 
         // hide mouse after n ticks
+#ifndef PSP_NATIVE_INPUT
         if(mouse_visible_ticks > 0) {
             mouse_visible_ticks -= SDL_GetTicks64() - frame_start;
             if(mouse_visible_ticks <= 0) {
                 SDL_ShowCursor(0);
             }
         }
+#endif
 
         // Render scene
         uint64_t frame_dt = SDL_GetTicks64() - frame_start;

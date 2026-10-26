@@ -1,11 +1,12 @@
 # OpenOMF PSP port
 
 This port compiles OpenOMF's original C game engine using the PSPSDK, with
-**native PSP GU sprite rendering**, **native PSP sceAudio mixing**, SDL2
-controller/input, and libxmp/PSM music. It is independent of the desktop
-OpenGL/epoxy CMake build. SDL2 is still used for engine events, timing,
-input, window setup and utilities, but the default PSP build does not
-compile or link SDL_mixer.
+**native PSP GU sprite rendering**, **native PSP sceAudio mixing**,
+**native sceCtrl controller input**, and libxmp/PSM music. It is independent
+of the desktop OpenGL/epoxy CMake build. SDL2 is still used for video/window
+initialization, timing, remaining keyboard/GUI helpers and utilities,
+but the default PSP build no longer initializes SDL joystick/GameController
+or haptic services, polls SDL input events, or links SDL_mixer.
 
 ## Build and install
 
@@ -99,8 +100,9 @@ psp-cmake -S ports/psp -B build/psp-dual-audio -G Ninja \
 ```
 
 Both variants keep the desktop audio implementation unchanged. Full SDL2
-removal from PSP is a separate task, since the engine's controller, window,
-event, timer, logging and GUI code still refer to SDL2.
+removal from PSP is a separate task: the window, timer, logging and GUI
+code still refer to SDL2, and desktop keyboard/controller implementations
+remain available only outside the native PSP controller path.
 
 #### Native audio benchmark (real PSP, October 26, 2026)
 
@@ -124,6 +126,49 @@ PSPLink exceptions. The speed difference is within normal combat variability;
 the clearest benefits are reduced middleware dependency and lower PCM memory.
 Removing SDL_mixer from the default native build also reduced `EBOOT.PBP`
 from 3,734,636 to 2,877,576 bytes (about 23%).
+
+### Native PSP controller and event handling
+
+`PSP_NATIVE_INPUT=ON` (default) compiles `src/controller/psp_joystick.c`
+instead of the SDL GameController implementation. The PSP driver initializes
+`sceCtrl` in analog mode and polls the built-in controller without an SDL
+joystick thread. Both combat and menus deliver normal OpenOMF `ACT_*`
+actions, preserving game logic and existing input-delay behavior.
+
+| PSP control | OpenOMF action |
+| --- | --- |
+| D-pad / analog stick | Four movement directions, including diagonals |
+| Cross | Punch / menu confirm |
+| Circle | Kick / menu back |
+| Start | Menu escape (not application exit) |
+| Release directions/buttons | Stop |
+
+Analog movement follows the prior SDL implementation's dead zone and
+priority over the D-pad. HOME is left to the PSP system and is **not**
+mapped to game/application exit. PSP-only input menus do not offer
+inapplicable keyboard or second-local-joystick entries. Desktop joystick
+and keyboard code is unchanged. PSP boot also enforces the native gamepad
+for player one if an old desktop keyboard configuration was saved.
+
+The PSP engine now bypasses SDL event polling, and startup skips SDL
+joystick/GameController/haptic initialization. It still initializes SDL
+video/timer services because its window, render and timing helpers depend
+on them; native timing and further SDL elimination are later milestones.
+
+Build the previous input backend for comparisons:
+
+```sh
+psp-cmake -S ports/psp -B build/psp-sdl-input -G Ninja \
+  -DPSP_NATIVE_INPUT=OFF
+```
+
+For input tests, `-DPSP_NATIVE_INPUT_TRACE=ON` logs changes of
+raw `sceCtrl` button and analog state together with decoded OpenOMF
+actions. In PPSSPP 1.20.4, WebSocket debugger
+`input.buttons.press` and `input.analog.send` were used to inject all
+four directions, Cross, Circle, Start, and the four analog extremes.
+Traces confirmed the expected action bits, a Cross-driven menu-to-game
+transition, and return to neutral. The normal release has tracing OFF.
 
 ## Repeatable gameplay stress tests
 

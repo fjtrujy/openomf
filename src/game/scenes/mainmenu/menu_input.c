@@ -130,12 +130,20 @@ void menu_set_joystick1(component *c, void *userdata) {
     if(local->selected_player == 1) {
         k->ctrl_type1 = CTRL_TYPE_GAMEPAD;
         omf_free(k->joy_name1);
+#ifdef PSP_NATIVE_INPUT
+        k->joy_name1 = omf_strdup(joystick_device_name(joystick_nth_id(1)));
+#else
         k->joy_name1 = omf_strdup(SDL_JoystickNameForIndex(joystick_nth_id(1)));
+#endif
         k->joy_offset1 = joystick_offset(joystick_nth_id(1), k->joy_name1);
     } else {
         k->ctrl_type2 = CTRL_TYPE_GAMEPAD;
         omf_free(k->joy_name2);
+#ifdef PSP_NATIVE_INPUT
+        k->joy_name2 = omf_strdup(joystick_device_name(joystick_nth_id(1)));
+#else
         k->joy_name2 = omf_strdup(SDL_JoystickNameForIndex(joystick_nth_id(1)));
+#endif
         k->joy_offset2 = joystick_offset(joystick_nth_id(1), k->joy_name2);
     }
     reconfigure_controller(((scene *)userdata)->gs);
@@ -187,6 +195,7 @@ component *menu_input_create(scene *s, int player_id) {
     str_free(&tmp);
 
     menu_attach(menu, filler_create());
+#ifndef PSP_NATIVE_INPUT
     menu_attach(
         menu, button_create("RIGHT KEYBOARD",
                             "This will use the numeric keypad for movement, enter for punch and right shift for kick.",
@@ -198,17 +207,24 @@ component *menu_input_create(scene *s, int player_id) {
                               false, false, menu_set_left_keyboard, s));
     menu_attach(menu, button_create("CUSTOM KEYBOARD", "Invent your own keyboard settings.", false, false,
                                     menu_set_custom_keyboard, s));
+#endif
     component *joy1 = button_create("JOYSTICK 1", "Use joystick 1.", false, false, menu_set_joystick1, s);
+#ifndef PSP_NATIVE_INPUT
     component *joy2 = button_create("JOYSTICK 2", "Use joystick 2.", false, false, menu_set_joystick2, s);
+#endif
     int jcount = joystick_count();
     if(jcount < 1) {
         component_disable(joy1, 1);
     }
+#ifndef PSP_NATIVE_INPUT
     if(jcount < 2) {
         component_disable(joy2, 1);
     }
+#endif
     menu_attach(menu, joy1);
+#ifndef PSP_NATIVE_INPUT
     menu_attach(menu, joy2);
+#endif
 
     int *bind_var = &settings_get()->keys.input1_delay;
 

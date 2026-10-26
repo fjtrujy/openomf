@@ -1273,6 +1273,11 @@ static void _setup_rec_controller(game_state *gs, int player_id, sd_rec_file *re
 
 void reconfigure_controller(game_state *gs) {
     settings_keyboard *k = &settings_get()->keys;
+#ifdef PSP_NATIVE_INPUT
+    // On PSP, no SDL keyboard/controller is initialized: always use the
+    // built-in pad for P1, even with a desktop keyboard saved in settings.
+    k->ctrl_type1 = CTRL_TYPE_GAMEPAD;
+#endif
     if(k->ctrl_type1 == CTRL_TYPE_KEYBOARD) {
         _setup_keyboard(gs, 0, 0);
     } else if(k->ctrl_type1 == CTRL_TYPE_GAMEPAD) {
