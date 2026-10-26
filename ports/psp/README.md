@@ -4,11 +4,11 @@ This port compiles OpenOMF's original C game engine using the PSPSDK, with
 **native PSP GU sprite rendering**, **native PSP sceAudio mixing**,
 **native sceCtrl controller input**, **native PSP kernel timing**, and
 libxmp/PSM music. It is independent of the desktop OpenGL/epoxy CMake
-build. The native PSP GU renderer now uses `sceDisplay` directly, without
-SDL video initialization or an SDL window. SDL2 remains linked for
-shared geometry types and other engine utilities,
-but the default PSP build no longer initializes SDL joystick/GameController
-or haptic services, polls SDL input events, or links SDL_mixer.
+build. The native PSP GU renderer uses `sceDisplay` directly and the
+default `PSP_STANDALONE=ON` build **does not link SDL2, SDL2main or
+SDL2_mixer**. OpenOMF still uses some SDL-named common data types and
+helpers in source; these are provided by a small PSP-only compatibility
+layer rather than the SDL runtime.
 
 ## Build and install
 
@@ -25,6 +25,72 @@ The packaged game is staged at `build/psp/PSP/GAME/OpenOMF/` (~16 MiB). Copy
 this **whole directory** to `ms0:/PSP/GAME/OpenOMF/` on the memory stick:
 the EBOOT is not standalone. All files in `resources/` must remain beside it.
 `save/` holds logs, settings and saved progress.
+
+### SDL2-free PSP executable
+
+`PSP_STANDALONE=ON` (default) compiles a PSP module entry point and
+registers a PSP kernel HOME/exit callback instead of using SDL2main.
+The supported native path uses PSP GU, `sceAudio`, `sceCtrl`, and the
+kernel clock. It uses normal PSP kernel semaphores for log synchronization,
+the current EBOOT working directory for bundled resources, and standard
+file I/O for network trace files. Inapplicable PSP keyboard and clipboard
+operations remain inert. No SDL2 runtime or SDL2_mixer library is linked.
+
+The shared renderer/UI interfaces still include SDL headers for
+`SDL_Rect`, `SDL_Event`, keyboard constants, and other common types;
+`ports/psp/psp_sdl_compat.c` supplies limited implementations for
+legacy utility calls. This is a **link-time SDL2-free** milestone, not
+yet a complete source-level migration away from SDL types. Desktop
+sources and behavior are unchanged.
+
+The `Software` renderer is preserved in standalone mode by forcing the
+existing indexed **CPU compositor** and presenting its RGBA result through
+PSP GU. This does not require SDL software rendering, but it does require
+GU for the final screen blit. The standard SDL software renderer remains
+available when building the legacy PSP variant.
+
+To build the previous SDL2-linked PSP implementation:
+
+```sh
+psp-cmake -S ports/psp -B build/psp-sdl-legacy -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DPSP_STANDALONE=OFF
+cmake --build build/psp-sdl-legacy -j8
+```
+
+If using `PSP_NATIVE_INPUT=OFF`, `PSP_NATIVE_TIMING=OFF`,
+`PSP_NATIVE_DISPLAY=OFF`, `PSP_NATIVE_AUDIO=OFF`, or
+`PSP_SDL_AUDIO_FALLBACK=ON`, also set `PSP_STANDALONE=OFF`.
+The standalone target intentionally rejects those incompatible combinations.
+The PSP HOME/exit callback has been observed registering on hardware;
+the user's actual HOME-button confirmation and an XMB Memory Stick
+launch are still outstanding. The callback uses `sceKernelExitGame()`
+as in PSPSDK samples; normal engine exit (rather than an OS-requested
+HOME exit) restores the previous CPU/bus clock.
+
+#### SDL2-free build validation (October 26, 2026)
+
+The default PSP EBOOT is **1,764,508 bytes** without linking any of
+`SDL2`, `SDL2main`, or `SDL2_mixer`. The equivalent legacy SDL-linked
+build is **2,873,608 bytes** (standalone is about 39% smaller).
+PSPLink/HostFS and PPSSPP both loaded resources, initialized
+the native audio and controller devices and performed sustained
+AI-versus-AI combat without an SDL runtime.
+
+| PSP standalone run | 120s completed | Average FPS | Native audio errors |
+| --- | --- | ---: | ---: |
+| Real PSP at 333 MHz (native GU, registered HOME callback) | PASS | 58.23 | 0 |
+| PPSSPP strict classic JIT (native GU, registered HOME callback) | PASS | 59.25 | 0 |
+| PPSSPP strict classic JIT (CPU indexed `Software` renderer) | PASS | 29.69 | 0 |
+
+All three tests shut down cleanly, with no new PSPLink exceptions or
+PPSSPP host crashes. The PSP clock returned to 222 MHz on normal exit.
+The CPU fallback reported `GPU=0` and thousands of CPU-composited frames
+in the renderer counters; GU is still used to display the final image.
+The legacy SDL-linked PSP configuration builds successfully as well.
+
+These are randomized matches with loading included, not deterministic
+CPU-only benchmarks. The full human-controlled campaign, PSP system
+HOME button and direct XMB launch still require hands-on validation.
 
 Original One Must Fall 2097 data are not in git. `package.sh` downloads the
 freeware data archive from `www.omf2097.com` if no archive is present. You can
@@ -80,23 +146,24 @@ SDL without its video subsystem, and GU initialization no longer creates
 an SDL window. Presentation still uses PSP VBlank synchronization and
 `sceGuSwapBuffers()`; normal shutdown disables and terminates the GU.
 
-The desktop implementation is unchanged. SDL2 remains linked because the
-shared rendering interfaces use `SDL_Rect` and other engine utilities
-still depend on SDL, so this is **not yet a completely SDL-free build**.
+The desktop implementation is unchanged. On the PSP standalone build,
+shared `SDL_Rect` types remain in source, but the PSP compatibility
+layer supplies the limited legacy helpers without linking SDL2.
 
 The previous PSP SDL video/window path remains selectable:
 
 ```sh
 psp-cmake -S ports/psp -B build/psp-legacy-display -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DPSP_NATIVE_DISPLAY=OFF
+  -DCMAKE_BUILD_TYPE=Release -DPSP_STANDALONE=OFF \
+  -DPSP_NATIVE_DISPLAY=OFF
 cmake --build build/psp-legacy-display -j8
 ```
 
-The separate `Software` renderer is also retained. If selected when SDL
-video is disabled, it initializes the SDL video subsystem lazily before
-creating its own software-renderer window. PSP builds use stub settings,
-so `-DPSP_TEST_SOFTWARE_RENDERER=ON` can force that fallback for testing
-only; it should remain OFF for packaged releases.
+The separate `Software` renderer is also retained. In standalone
+mode it runs the indexed CPU compositor with GU presentation, while the
+legacy SDL-linked build still initializes the SDL video subsystem lazily
+before creating the software-renderer window. PSP builds use stub settings;
+`-DPSP_TEST_SOFTWARE_RENDERER=ON` forces the fallback for testing only.
 
 #### Display validation (October 26, 2026)
 
@@ -144,17 +211,18 @@ Both alternative build configurations remain supported:
 ```sh
 # Restore the original SDL_mixer implementation for A/B testing.
 psp-cmake -S ports/psp -B build/psp-sdl-audio -G Ninja \
-  -DPSP_NATIVE_AUDIO=OFF
+  -DPSP_STANDALONE=OFF -DPSP_NATIVE_AUDIO=OFF
 
 # Include both: native by default, SDL_mixer selectable by audio-backend name.
 psp-cmake -S ports/psp -B build/psp-dual-audio -G Ninja \
-  -DPSP_NATIVE_AUDIO=ON -DPSP_SDL_AUDIO_FALLBACK=ON
+  -DPSP_STANDALONE=OFF -DPSP_NATIVE_AUDIO=ON \
+  -DPSP_SDL_AUDIO_FALLBACK=ON
 ```
 
-Both variants keep the desktop audio implementation unchanged. Full SDL2
-removal from PSP is still a separate task: shared GUI/geometry APIs,
-utilities and the optional software/SDL-mixer fallbacks retain SDL
-dependencies. Desktop keyboard/controller implementations are unchanged.
+Both variants keep the desktop audio implementation unchanged.
+The default standalone PSP build no longer links SDL2; shared SDL
+type names and limited compatibility functions remain in PSP source.
+Desktop keyboard/controller implementations are unchanged.
 
 #### Native audio benchmark (real PSP, October 26, 2026)
 
@@ -202,16 +270,16 @@ inapplicable keyboard or second-local-joystick entries. Desktop joystick
 and keyboard code is unchanged. PSP boot also enforces the native gamepad
 for player one if an old desktop keyboard configuration was saved.
 
-The PSP engine bypasses SDL event polling, and startup skips SDL
-joystick/GameController/haptic initialization. With native GU enabled,
-SDL video startup is bypassed too; SDL is retained for the remaining
-shared helpers and optional fallbacks.
+The standalone PSP engine bypasses SDL event polling and all SDL
+subsystem initialization. With native GU enabled, SDL video startup
+is bypassed too; SDL remains only a legacy source-level interface,
+with native PSP implementations and optional SDL-linked builds.
 
 Build the previous input backend for comparisons:
 
 ```sh
 psp-cmake -S ports/psp -B build/psp-sdl-input -G Ninja \
-  -DPSP_NATIVE_INPUT=OFF
+  -DPSP_STANDALONE=OFF -DPSP_NATIVE_INPUT=OFF
 ```
 
 For input tests, `-DPSP_NATIVE_INPUT_TRACE=ON` logs changes of
@@ -238,15 +306,15 @@ To compare with the previous implementation:
 
 ```sh
 psp-cmake -S ports/psp -B build/psp-sdl-timing -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DPSP_NATIVE_TIMING=OFF
+  -DCMAKE_BUILD_TYPE=Release -DPSP_STANDALONE=OFF \
+  -DPSP_NATIVE_TIMING=OFF
 cmake --build build/psp-sdl-timing -j8
 ```
 
 The native clock changes neither game tick rates nor the GPU's existing
 VBlank synchronization. Desktop builds still use SDL timing.
-SDL2 remains linked for the shared engine's other SDL dependencies and
-the optional software renderer; native PSP timing alone does not imply
-a fully SDL-free executable.
+SDL2 is linked only in the optional legacy build. The default standalone
+build uses native PSP timing and does not link an SDL runtime.
 
 #### Native timing validation (October 26, 2026)
 

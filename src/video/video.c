@@ -37,7 +37,11 @@ static renderer_init all_renderers[] = {
     gl3_renderer_set_callbacks,
 #endif
 #ifdef ENABLE_SOFTWARE_RENDERER
+#ifdef PSP_STANDALONE
+    psp_gu_software_renderer_set_callbacks,
+#else
     software_renderer_set_callbacks,
+#endif
 #endif
 #ifdef ENABLE_NULL_RENDERER
     null_renderer_set_callbacks,

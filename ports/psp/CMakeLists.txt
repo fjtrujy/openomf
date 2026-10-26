@@ -20,8 +20,13 @@ option(PSP_NATIVE_INPUT_TRACE "Log PSP physical controller state changes for reg
 option(PSP_NATIVE_TIMING "Use sceKernelGetSystemTimeWide and sceKernelDelayThread for PSP game/frame timing" ON)
 option(PSP_NATIVE_DISPLAY "Initialize PSP GU display without SDL video or an SDL window" ON)
 option(PSP_TEST_SOFTWARE_RENDERER "Force the SDL software renderer on PSP for isolated fallback testing" OFF)
+option(PSP_STANDALONE "Build PSP without linking SDL2 or SDL2main" ON)
 option(PSP_NATIVE_AUDIO "Use the native sceAudio backend (no SDL_mixer dependency by default)" ON)
 option(PSP_SDL_AUDIO_FALLBACK "Also compile SDL_mixer as an alternate PSP audio backend" OFF)
+if(PSP_STANDALONE AND (NOT PSP_NATIVE_INPUT OR NOT PSP_NATIVE_TIMING OR NOT PSP_NATIVE_AUDIO OR
+                       NOT PSP_NATIVE_DISPLAY OR PSP_SDL_AUDIO_FALLBACK))
+    message(FATAL_ERROR "PSP_STANDALONE requires native input, timing, audio, display and no SDL_mixer fallback")
+endif()
 option(PSP_STRESS_DEMO "Start AI-vs-AI arena stress test for profiling (never enable in a shipping build)" OFF)
 set(PSP_STRESS_ARENA 0 CACHE STRING "Arena 0..4 for the 120s PSP stress test")
 if(NOT PSP_STRESS_ARENA MATCHES "^[0-4]$")
@@ -35,9 +40,15 @@ list(FILTER OMF_CORE EXCLUDE REGEX "/src/video/renderers/")
 list(FILTER OMF_CORE EXCLUDE REGEX "/src/vendored/(argtable|zip)/")
 list(REMOVE_ITEM OMF_CORE "${OMF_ROOT}/src/controller/psp_joystick.c")
 list(APPEND OMF_CORE
-    "${OMF_ROOT}/src/video/renderers/software/software_renderer.c"
     "${OMF_ROOT}/src/video/renderers/psp/gu_renderer.c"
 )
+if(NOT PSP_STANDALONE)
+    list(APPEND OMF_CORE "${OMF_ROOT}/src/video/renderers/software/software_renderer.c")
+endif()
+if(PSP_STANDALONE)
+    list(APPEND OMF_CORE "${CMAKE_CURRENT_SOURCE_DIR}/psp_sdl_compat.c"
+                         "${CMAKE_CURRENT_SOURCE_DIR}/psp_lifecycle.c")
+endif()
 if(PSP_NATIVE_INPUT)
     list(REMOVE_ITEM OMF_CORE "${OMF_ROOT}/src/controller/joystick.c")
     list(REMOVE_ITEM OMF_CORE "${OMF_ROOT}/src/controller/game_controller_db.c")
@@ -104,6 +115,9 @@ endif()
 if(PSP_NATIVE_DISPLAY)
     target_compile_definitions(openomf_psp PRIVATE PSP_NATIVE_DISPLAY)
 endif()
+if(PSP_STANDALONE)
+    target_compile_definitions(openomf_psp PRIVATE PSP_STANDALONE SDL_MAIN_HANDLED)
+endif()
 if(PSP_TEST_SOFTWARE_RENDERER)
     target_compile_definitions(openomf_psp PRIVATE PSP_TEST_SOFTWARE_RENDERER)
 endif()
@@ -127,8 +141,11 @@ set(PSP_AUDIO_LIBRARIES "")
 if(NOT PSP_NATIVE_AUDIO OR PSP_SDL_AUDIO_FALLBACK)
     list(APPEND PSP_AUDIO_LIBRARIES SDL2_mixer)
 endif()
+if(NOT PSP_STANDALONE)
+    list(APPEND PSP_AUDIO_LIBRARIES SDL2main SDL2)
+endif()
 target_link_libraries(openomf_psp PRIVATE
-    ${PSP_AUDIO_LIBRARIES} SDL2main SDL2 xmp enet
+    ${PSP_AUDIO_LIBRARIES} xmp enet
     png16
     GL pspvram pspvfpu psphprm
     vorbisfile vorbis ogg modplug stdc++

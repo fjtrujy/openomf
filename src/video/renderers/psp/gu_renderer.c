@@ -86,6 +86,7 @@ typedef struct {
 #ifndef PSP_NATIVE_DISPLAY
     SDL_Window *window;
 #endif
+    bool force_software;
     int screen_w, screen_h, aspect, fb_scale, fps;
     int target_x, target_y;
     bool fullscreen, vsync, offscreen, needs_cpu;
@@ -133,6 +134,17 @@ static void create(renderer *r) {
     }
     r->ctx = ctx;
 }
+
+#ifdef PSP_STANDALONE
+static void create_software(renderer *r) {
+    create(r);
+    if(r->ctx) ((gu_context *)r->ctx)->force_software = true;
+}
+static const char *get_software_name(void) { return "Software"; }
+static const char *get_software_description(void) {
+    return "PSP indexed CPU software compositor presented through GU";
+}
+#endif
 
 static void clear_textures(gu_context *ctx) {
     for(int i = 0; i < MAX_TEXTURES; i++) {
@@ -345,7 +357,7 @@ static void prepare(void *userdata, unsigned framebuffer_options) {
     ctx->frame_no++;
     ctx->frame_effects = 0;
     ctx->offscreen = false;
-    ctx->needs_cpu = ctx->screenshot != NULL;
+    ctx->needs_cpu = ctx->force_software || ctx->screenshot != NULL;
     ctx->framebuffer_options = framebuffer_options;
 }
 
@@ -825,3 +837,12 @@ void psp_gu_renderer_set_callbacks(renderer *r) {
     r->signal_scene_change = scene_change;
     r->signal_draw_atlas = draw_atlas;
 }
+
+#ifdef PSP_STANDALONE
+void psp_gu_software_renderer_set_callbacks(renderer *r) {
+    psp_gu_renderer_set_callbacks(r);
+    r->get_name = get_software_name;
+    r->get_description = get_software_description;
+    r->create = create_software;
+}
+#endif

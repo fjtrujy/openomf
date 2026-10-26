@@ -18,6 +18,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#ifdef PSP_STANDALONE
+#include <pspkernel.h>
+PSP_MODULE_INFO("OpenOMF", 0, 1, 0);
+PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
+extern int psp_install_exit_callback(void);
+#endif
 
 #if defined(__PSP__) && defined(PSP_CLOCK_333)
 #include <psppower.h>
@@ -231,6 +237,13 @@ int main(int argc, char *argv[]) {
 
     // Simple header
     log_info("Starting OpenOMF v%s", get_version_string());
+#ifdef PSP_STANDALONE
+    if(psp_install_exit_callback() < 0) {
+        log_warn("PSP: could not register native HOME/exit callback");
+    } else {
+        log_info("PSP: native HOME/exit callback enabled");
+    }
+#endif
     if(strlen(git_sha1_hash) > 0) {
         log_info("Git SHA1 hash: %s", git_sha1_hash);
     }
@@ -284,6 +297,7 @@ int main(int argc, char *argv[]) {
         settings_get()->net.net_listen_port_start = listen_port;
     }
 
+#ifndef PSP_STANDALONE
     // Native PSP GU owns its display. The optional SDL software renderer
     // initializes SDL video lazily when explicitly selected.
 #if defined(__PSP__) && defined(PSP_NATIVE_DISPLAY)
@@ -324,6 +338,9 @@ int main(int argc, char *argv[]) {
 #else
     log_info("PSP native input: SDL joystick, GameController and haptic services disabled");
 #endif
+#else
+    log_info("PSP standalone: native GU/audio/input/timing without SDL2");
+#endif
 
     // Init enet
     if(enet_initialize() != 0) {
@@ -346,7 +363,9 @@ int main(int argc, char *argv[]) {
 exit_4:
     enet_deinitialize();
 exit_3:
+#ifndef PSP_STANDALONE
     SDL_Quit();
+#endif
 exit_2:
     if(oldlobbyaddr) {
         // we probably don't want to save this override
