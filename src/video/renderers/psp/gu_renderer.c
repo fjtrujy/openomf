@@ -6,9 +6,10 @@
  * the 320x200 framebuffer and avoids RGBA texture conversions on palette fades.
  *
  * Fixed-function GU cannot remap the DESTINATION palette index (GL3's
- * multi-channel intermediate). For those unusual overlays we replay recorded
- * sprite commands through the existing indexed compositing rules and submit
- * one RGBA image to GU. Offscreen capture also uses indexed compositing.
+ * multi-channel intermediate). For bounded intro remaps and small combat
+ * shadows at high CPU clocks, we reconstruct exact indexed tiles using an
+ * on-demand GU-indexed prefix. Larger effects use fast GU approximations;
+ * offscreen capture retains the full indexed CPU compositor.
  *
  * The PSP GU owns the framebuffer and display lifecycle. omf_rect remains a
  * shared renderer interface type; a native PSP build needs no SDL window.
@@ -29,6 +30,7 @@
 #include <pspge.h>
 #include <pspgu.h>
 #include <pspkernel.h>
+#include <psppower.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,6 +69,7 @@
 #define PSP_EXACT_TILE_COUNT (PSP_EXACT_TILE_COLS * PSP_EXACT_TILE_ROWS)
 #define PSP_EXACT_TILE_LIMIT (PSP_EXACT_EFFECT_MAX_PIXELS / (PSP_EXACT_TILE_SIZE * PSP_EXACT_TILE_SIZE))
 #define PSP_EXACT_PREFIX_MAX_COMMANDS 16
+#define PSP_EXACT_COMBAT_TILE_LIMIT 16
 
 #if VGA_PALETTE_SIZE != 256
 #error "PSP GU T8 textures require OpenOMF's 256-color palette build"
@@ -164,6 +167,7 @@ typedef struct {
     uint32_t *rgba_frame;
 #ifdef PSP_GU_PROFILE
     unsigned long exact_effect_frames, exact_effect_pixels, skipped_effect_frames;
+    unsigned long exact_combat_frames;
     uint64_t exact_effect_cpu_us;
 #endif
     omf_rect offscreen_area;
@@ -995,17 +999,21 @@ static omf_rect exact_tile_bounds(int col, int row) {
 // one GU draw without altering draw order elsewhere on the screen.
 static unsigned exact_effect_tiles(const gu_context *ctx, uint8_t marked[PSP_EXACT_TILE_COUNT]) {
     memset(marked, 0, PSP_EXACT_TILE_COUNT);
-    // Only the electrical reveal currently has a validated exact path.
-    // Ordinary combat remaps are frequent and too expensive to replay on
-    // the EE-like PSP CPU; retain their fast GU approximation for now.
-    if(!(ctx->framebuffer_options & FBUFOPT_BRIGHT_DESTINATION_REMAP)) return 0;
+    const bool intro = !!(ctx->framebuffer_options & FBUFOPT_BRIGHT_DESTINATION_REMAP);
+    if(!intro) {
+        // A shadow's remap_rounds also sets the destination-remap flag.
+        // Only handle shadow-owned remaps here; separate remap, dark-tint,
+        // and additive commands still take the fast combat GU path.
+        if(!(ctx->frame_effects & 2) || (ctx->frame_effects & (4 | 8))) return 0;
+        for(unsigned i = 0; i < ctx->command_count; ++i) {
+            const draw_command *cmd = &ctx->commands[i];
+            if(cmd->remap_rounds > 0 && !(cmd->options & SPRITE_SHADOW)) return 0;
+        }
+    }
     unsigned count = 0;
     for(unsigned i = 0; i < ctx->command_count; ++i) {
         const draw_command *cmd = &ctx->commands[i];
-        // Shadows and dark tint appear on most combat frames: reconstructing
-        // them tile by tile is substantially slower than the fast GU mask.
-        // Target destination-index remaps first (notably intro lightning).
-        if(cmd->remap_rounds <= 0) continue;
+        if(intro ? cmd->remap_rounds <= 0 : !(cmd->options & SPRITE_SHADOW)) continue;
         const gu_texture *tex = &ctx->textures[cmd->texture];
         const omf_rect *r = &cmd->dst;
         if(r->w <= 0 || r->h <= 0) continue;
@@ -1302,15 +1310,23 @@ static void finish(void *userdata) {
 #ifdef PSP_GU_APPROX_EFFECTS
     uint8_t exact_tiles[PSP_EXACT_TILE_COUNT];
     bool exact_tiles_ready = false;
+    const bool intro_exact = !!(ctx->framebuffer_options & FBUFOPT_BRIGHT_DESTINATION_REMAP);
 #ifdef PSP_GU_PROFILE
     const uint64_t scan_start = sceKernelGetSystemTimeWide();
 #endif
-    const unsigned exact_tile_count = ctx->needs_cpu ? 0 : exact_effect_tiles(ctx, exact_tiles);
+    // Real-PSP measurements show large combat shadows are far too expensive
+    // to reconstruct at 222 MHz. Preserve the fast 60 FPS GU path at that
+    // clock; permit small exact shadow regions when the CPU runs at 333 MHz.
+    const bool combat_exact = !intro_exact && (ctx->frame_effects & 2) &&
+                              scePowerGetCpuClockFrequencyInt() >= 300;
+    const unsigned exact_tile_count = (!ctx->needs_cpu && (intro_exact || combat_exact)) ?
+        exact_effect_tiles(ctx, exact_tiles) : 0;
 #ifdef PSP_GU_PROFILE
     ctx->exact_tile_scan_us += sceKernelGetSystemTimeWide() - scan_start;
 #endif
     if(exact_tile_count) {
-        if(exact_tile_count <= PSP_EXACT_TILE_LIMIT) {
+        const unsigned tile_limit = intro_exact ? PSP_EXACT_TILE_LIMIT : PSP_EXACT_COMBAT_TILE_LIMIT;
+        if(exact_tile_count <= tile_limit) {
 #ifdef PSP_GU_PROFILE
             const uint64_t exact_start = sceKernelGetSystemTimeWide();
 #endif
@@ -1324,6 +1340,7 @@ static void finish(void *userdata) {
 #ifdef PSP_GU_PROFILE
             if(exact_tiles_ready) {
                 ++ctx->exact_effect_frames;
+                if(!intro_exact) ++ctx->exact_combat_frames;
                 ctx->exact_effect_pixels += exact_tile_count * PSP_EXACT_TILE_SIZE * PSP_EXACT_TILE_SIZE;
                 ctx->exact_effect_cpu_us += sceKernelGetSystemTimeWide() - exact_start;
             }
@@ -1460,6 +1477,9 @@ static void finish(void *userdata) {
         log_info("PSP GU exact effects (600 frames): exact=%lu pixels=%lu skipped=%lu replay-us=%llu",
                  ctx->exact_effect_frames, ctx->exact_effect_pixels, ctx->skipped_effect_frames,
                  (unsigned long long)ctx->exact_effect_cpu_us);
+        log_info("PSP GU exact combat shadows (600 frames): corrected=%lu",
+                 ctx->exact_combat_frames);
+        ctx->exact_combat_frames = 0;
         ctx->exact_effect_frames = ctx->exact_effect_pixels = ctx->skipped_effect_frames = 0;
         ctx->exact_effect_cpu_us = 0;
         log_info("PSP GU indexed prefix (600 frames): hits=%lu builds=%lu",
