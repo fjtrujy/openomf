@@ -204,6 +204,12 @@ its fast blending approximation to preserve gameplay performance.
 reuse of cached shadow coverage and indexed remap lookup tables, reducing
 the measured exact-tile preparation cost without broadening the 16-tile
 combat budget or changing the fast 222 MHz rendering policy.
+**Indexed capture and credits follow-up:**
+[GU_INDEXED_OFFSCREEN_AND_CREDITS.md](GU_INDEXED_OFFSCREEN_AND_CREDITS.md)
+documents the GU-backed robot/newsroom capture path and dual-channel indexed
+credits compositing. These remove further CPU sprite replay without introducing
+a persistent indexed mirror. Translucent/oversized captures and general
+destination-index effects retain their existing fallback or approximation.
 To compare against the full indexed software path:
 
 ```sh

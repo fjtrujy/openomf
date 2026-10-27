@@ -129,6 +129,9 @@ typedef struct {
     draw_command commands[MAX_COMMANDS];
     unsigned command_count;
     unsigned long gpu_frames, cpu_frames, shadow_frames, remap_frames, tint_frames, additive_frames;
+#ifdef PSP_GU_PROFILE
+    unsigned long indexed_credits_frames, indexed_capture_frames, cpu_capture_frames;
+#endif
     unsigned frame_effects;
     vga_palette palette;
     vga_remap_tables remaps;
@@ -1121,6 +1124,16 @@ static void capture_cpu(gu_context *ctx) {
     free(rgb);
 }
 
+static void gpu_present_rgba_frame(gu_context *ctx, const omf_rect *vp) {
+    sceGuTexMode(GU_PSM_8888, 0, 0, 0);
+    sceGuTexImage(0, 512, 256, 512, ctx->rgba_frame);
+    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+    sceGuColor(0xffffffff);
+    gu_sprite_vertex *v = sceGuGetMemory(sizeof(gu_sprite_vertex) * 2);
+    sprite_vertices(v, vp, GAME_W, GAME_H, 0);
+    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 2, 0, v);
+}
+
 static void gpu_draw_cpu_frame(gu_context *ctx, const omf_rect *vp) {
     if(!ctx->rgba_frame) {
         ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
@@ -1135,13 +1148,7 @@ static void gpu_draw_cpu_frame(gu_context *ctx, const omf_rect *vp) {
         }
     }
     sceKernelDcacheWritebackRange(ctx->rgba_frame, 512 * 256 * sizeof(uint32_t));
-    sceGuTexMode(GU_PSM_8888, 0, 0, 0);
-    sceGuTexImage(0, 512, 256, 512, ctx->rgba_frame);
-    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
-    sceGuColor(0xffffffff);
-    gu_sprite_vertex *v = sceGuGetMemory(sizeof(gu_sprite_vertex) * 2);
-    sprite_vertices(v, vp, GAME_W, GAME_H, 0);
-    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 2, 0, v);
+    gpu_present_rgba_frame(ctx, vp);
 }
 
 #ifdef PSP_GU_APPROX_EFFECTS
@@ -1241,6 +1248,131 @@ static bool gpu_prepare_exact_prefix(gu_context *ctx) {
 #endif
     ctx->cpu_prefix_count=prefix;
     ctx->cpu_prefix_valid=true;
+    return true;
+}
+
+static bool preserves_base_index(const draw_command *cmd) {
+    return cmd->remap_rounds > 0 ||
+           (cmd->options & (SPRITE_SHADOW | SPRITE_DARK_TINT | SPRITE_INDEX_ADD));
+}
+
+// Render indexed sprites to the spare 320x200 GU target. Normal draws replace
+// the base index (red byte); credits' INDEX_ADD draws replace only the add
+// term (green byte). Pixel masking preserves the original write ordering:
+// regular sprites clear prior additions, and later additions replace earlier
+// ones rather than accumulating them.
+static bool gpu_render_indexed_pass(gu_context *ctx, bool credits) {
+    bool indexed_clut_ready[MAX_CLUTS] = {false};
+    for(unsigned i = 0; i < ctx->command_count; ++i) {
+        draw_command *cmd = &ctx->commands[i];
+        if(!credits && preserves_base_index(cmd)) continue;
+        const int slot = get_clut(ctx, cmd);
+        if(slot < 0) return false;
+        cmd->clut = (uint16_t)slot;
+        if(indexed_clut_ready[slot]) continue;
+        indexed_clut_ready[slot] = true;
+        for(int index = 0; index < VGA_PALETTE_SIZE; ++index) {
+            const uint32_t source = (uint32_t)source_index(ctx, cmd, index);
+            const uint32_t color = credits && (cmd->options & SPRITE_INDEX_ADD)
+                ? (uint32_t)imin((int)source * 60, 255) << 8 : source;
+            ctx->indexed_clut[slot][index] =
+                index == cmd->transparent ? 0u : (0xff000000u | color);
+        }
+        sceKernelDcacheWritebackRange(ctx->indexed_clut[slot],
+                                      sizeof(ctx->indexed_clut[slot]));
+    }
+
+    const omf_rect ivp = {0, 0, GAME_W, GAME_H};
+    sceGuStart(GU_DIRECT, ctx->display_list);
+    sceGuDrawBufferList(GU_PSM_8888, (void *)(2 * FRAME_BYTES), BUFFER_PITCH);
+    sceGuScissor(0, 0, GAME_W, GAME_H);
+    sceGuPixelMask(0);
+    sceGuClearColor(0xff000000);
+    sceGuClear(GU_COLOR_BUFFER_BIT);
+    sceGuEnable(GU_BLEND);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    sceGuTexMode(GU_PSM_T8, 0, 0, GU_FALSE);
+    sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+    int last_clut = -1, last_texture = -1;
+    for(unsigned i = 0; i < ctx->command_count; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        if(!credits && preserves_base_index(cmd)) continue;
+        if(credits) sceGuPixelMask(cmd->options & SPRITE_INDEX_ADD ? 0xffff00ffu : 0u);
+        const bool clut_changed = cmd->clut != last_clut;
+        const bool texture_changed = cmd->texture != last_texture;
+        last_clut = cmd->clut;
+        last_texture = cmd->texture;
+        gpu_draw(ctx, cmd, &ivp, clut_changed, texture_changed, true);
+    }
+    sceGuPixelMask(0);
+    sceGuDrawBufferList(GU_PSM_8888, ctx->active_draw_buffer, BUFFER_PITCH);
+    sceGuFinish();
+    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    return true;
+}
+
+// HAR/newsroom captures use only the base palette index of each destination
+// pixel. Shadow, tint, additive and destination-remap commands do not write
+// that field in the original indexed compositor, so they can be omitted.
+static bool gpu_capture_area_indices(gu_context *ctx, surface *dst) {
+    if(ctx->force_software) return false;
+    for(unsigned i = 0; i < ctx->command_count; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        if(preserves_base_index(cmd)) continue;
+        const gu_texture *tex = &ctx->textures[cmd->texture];
+        // GU alpha blending is continuous; CPU opacity uses a Bayer mask.
+        if(cmd->opacity != 255 || tex->w > 512 || tex->h > 512)
+            return false;
+    }
+    if(!gpu_render_indexed_pass(ctx, false)) return false;
+
+    const omf_rect *r = &ctx->offscreen_area;
+    surface_create(dst, r->w, r->h);
+    dst->transparent = -1;
+    const volatile uint32_t *pixels = (const volatile uint32_t *)
+        ((uintptr_t)sceGeEdramGetAddr() + (uintptr_t)(2 * FRAME_BYTES));
+    for(int y = 0; y < r->h; ++y) {
+        const int sy = r->y + y;
+        for(int x = 0; x < r->w; ++x) {
+            const int sx = r->x + x;
+            dst->data[y * r->w + x] =
+                (sx >= 0 && sx < GAME_W && sy >= 0 && sy < GAME_H)
+                    ? (pixels[sy * BUFFER_PITCH + sx] & 0xffu) : 0;
+        }
+    }
+    return true;
+}
+
+// FBUFOPT_CREDITS ignores remap/dark state and resolves only index + add.
+// A dual-channel GU index buffer can therefore replace full CPU sprite
+// replay. Only the final 64,000 indexed pixels need a palette conversion.
+static bool gpu_prepare_credits_rgba(gu_context *ctx) {
+    if(!(ctx->framebuffer_options & FBUFOPT_CREDITS) || ctx->screenshot ||
+       ctx->force_software || !(ctx->frame_effects & 8))
+        return false;
+    for(unsigned i = 0; i < ctx->command_count; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        const gu_texture *tex = &ctx->textures[cmd->texture];
+        if(cmd->remap_rounds != 0 || (cmd->options & (SPRITE_SHADOW | SPRITE_DARK_TINT)) ||
+           cmd->opacity != 255 || tex->w > 512 || tex->h > 512)
+            return false;
+    }
+    if(!ctx->rgba_frame)
+        ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
+    if(!ctx->rgba_frame || !gpu_render_indexed_pass(ctx, true)) return false;
+
+    const volatile uint32_t *pixels = (const volatile uint32_t *)
+        ((uintptr_t)sceGeEdramGetAddr() + (uintptr_t)(2 * FRAME_BYTES));
+    for(int y = 0; y < GAME_H; ++y) {
+        for(int x = 0; x < GAME_W; ++x) {
+            const uint32_t encoded = pixels[y * BUFFER_PITCH + x];
+            const int index = iclamp((int)(encoded & 255u) + (int)((encoded >> 8) & 255u));
+            const vga_color c = ctx->palette.colors[index];
+            ctx->rgba_frame[y * 512 + x] = 0xff000000u |
+                ((uint32_t)c.b << 16) | ((uint32_t)c.g << 8) | c.r;
+        }
+    }
+    sceKernelDcacheWritebackRange(ctx->rgba_frame, 512 * 256 * sizeof(uint32_t));
     return true;
 }
 
@@ -1437,7 +1569,28 @@ static void finish(void *userdata) {
         }
     }
 #endif
-    if(ctx->needs_cpu && !cpu_replay(ctx)) {
+    bool credits_on_gpu = false;
+#ifdef PSP_GU_APPROX_EFFECTS
+    if(ctx->needs_cpu)
+        credits_on_gpu = gpu_prepare_credits_rgba(ctx);
+#ifdef PSP_STRESS_DEMO
+    if(credits_on_gpu && ctx->frame_no % 180 == 0 && cpu_replay(ctx)) {
+        unsigned mismatches = 0;
+        for(int y = 0; y < GAME_H; ++y) {
+            for(int x = 0; x < GAME_W; ++x) {
+                const int index = cpu_resolve(ctx, &ctx->cpu_frame[y * GAME_W + x]);
+                const vga_color c = ctx->palette.colors[index];
+                const uint32_t expected = 0xff000000u |
+                    ((uint32_t)c.b << 16) | ((uint32_t)c.g << 8) | c.r;
+                if(ctx->rgba_frame[y * 512 + x] != expected) ++mismatches;
+            }
+        }
+        log_info("PSP GU indexed credits verification: frame=%lu, differing pixels=%u",
+                 ctx->frame_no, mismatches);
+    }
+#endif
+#endif
+    if(ctx->needs_cpu && !credits_on_gpu && !cpu_replay(ctx)) {
         log_error("PSP GU CPU effect buffer unavailable");
         return;
     }
@@ -1457,13 +1610,19 @@ static void finish(void *userdata) {
     // The NATIVE aspect option intentionally uses the whole PSP screen.
     const omf_rect clip = viewport_bounds(ctx);
     sceGuScissor(clip.x, clip.y, clip.w, clip.h);
-    if(ctx->needs_cpu) {
+    if(ctx->needs_cpu && !credits_on_gpu) {
         ctx->cpu_frames++;
         if(ctx->frame_effects & 1) ctx->remap_frames++;
         if(ctx->frame_effects & 2) ctx->shadow_frames++;
         if(ctx->frame_effects & 4) ctx->tint_frames++;
         if(ctx->frame_effects & 8) ctx->additive_frames++;
         gpu_draw_cpu_frame(ctx, &vp);
+    } else if(credits_on_gpu) {
+        ctx->gpu_frames++;
+#ifdef PSP_GU_PROFILE
+        ++ctx->indexed_credits_frames;
+#endif
+        gpu_present_rgba_frame(ctx, &vp);
     } else {
         ctx->gpu_frames++;
         int last_clut = -1;
@@ -1537,6 +1696,9 @@ static void finish(void *userdata) {
                  ctx->gpu_frames, ctx->cpu_frames, ctx->remap_frames, ctx->shadow_frames,
                  ctx->tint_frames, ctx->additive_frames, ctx->command_count,
                  (unsigned)(ctx->texture_bytes / 1024));
+        log_info("PSP GU indexed captures: credits=%lu offscreen-GPU=%lu offscreen-CPU=%lu",
+                 ctx->indexed_credits_frames, ctx->indexed_capture_frames, ctx->cpu_capture_frames);
+        ctx->indexed_credits_frames = ctx->indexed_capture_frames = ctx->cpu_capture_frames = 0;
         log_info("PSP GU CLUT cache (600 frames): reused=%lu built=%lu invalidated=%lu",
                  ctx->clut_reused, ctx->clut_built, ctx->clut_invalidated);
         log_info("PSP GU shadow budget (600 frames): masks-evicted=%lu textures-evicted=%lu",
@@ -1602,6 +1764,33 @@ static void area_finish(void *userdata, surface *dst) {
     gu_context *ctx = userdata;
     const omf_rect *r = &ctx->offscreen_area;
     flush_palette(ctx);
+#ifdef PSP_GU_APPROX_EFFECTS
+    if(gpu_capture_area_indices(ctx, dst)) {
+#ifdef PSP_GU_PROFILE
+        ++ctx->indexed_capture_frames;
+#endif
+#ifdef PSP_STRESS_DEMO
+        // The stress build checks the new GPU capture against the original
+        // compositor, without doing any CPU rasterization in shipping builds.
+        if(cpu_replay(ctx)) {
+            unsigned mismatches = 0;
+            for(int y = 0; y < r->h; ++y)
+                for(int x = 0; x < r->w; ++x) {
+                    const int sx = r->x + x, sy = r->y + y;
+                    const int expected = (sx >= 0 && sx < GAME_W && sy >= 0 && sy < GAME_H)
+                        ? iclamp(ctx->cpu_frame[sy * GAME_W + sx].index) : 0;
+                    if(dst->data[y * r->w + x] != expected) ++mismatches;
+                }
+            log_info("PSP GU indexed offscreen capture: %dx%d, differing pixels=%u",
+                     r->w, r->h, mismatches);
+        }
+#endif
+        return;
+    }
+#endif
+#ifdef PSP_GU_PROFILE
+    ++ctx->cpu_capture_frames;
+#endif
     if(!cpu_replay(ctx)) {
         surface_create(dst, 1, 1);
         return;
