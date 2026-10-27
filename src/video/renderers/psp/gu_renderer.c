@@ -131,6 +131,16 @@ typedef struct {
     _Alignas(16) uint32_t display_list[GU_LIST_WORDS];
     _Alignas(16) uint32_t clut_storage[MAX_CLUTS][VGA_PALETTE_SIZE];
     clut_variant cluts[MAX_CLUTS];
+#ifdef PSP_GU_APPROX_EFFECTS
+    // Temporary index-coded CLUTs and draw-buffer tracking for the intro's
+    // infrequently changing, effect-free scene prefix.
+    _Alignas(16) uint32_t indexed_clut[MAX_CLUTS][VGA_PALETTE_SIZE];
+    void *active_draw_buffer;
+#ifdef PSP_GU_PROFILE
+    uint64_t gpu_prefix_total_us, gpu_prefix_sync_us, gpu_prefix_read_us;
+    unsigned long gpu_prefix_frames, gpu_prefix_fallback;
+#endif
+#endif
     uint8_t clut_hints[CLUT_HINTS]; /* Slot + 1; zero denotes no hint. */
     unsigned clut_count;
     unsigned cached_clut_options;
@@ -274,6 +284,9 @@ static bool setup(void *userdata, int w, int h, bool fullscreen, bool vsync, int
     sceGuInit();
     sceGuStart(GU_DIRECT, ctx->display_list);
     sceGuDrawBuffer(GU_PSM_8888, (void *)0, BUFFER_PITCH);
+#ifdef PSP_GU_APPROX_EFFECTS
+    ctx->active_draw_buffer = (void *)0;
+#endif
     sceGuDispBuffer(SCREEN_W, SCREEN_H, (void *)FRAME_BYTES, BUFFER_PITCH);
     sceGuOffset(2048 - SCREEN_W / 2, 2048 - SCREEN_H / 2);
     sceGuViewport(2048, 2048, SCREEN_W, SCREEN_H);
@@ -723,7 +736,7 @@ static void sprite_vertices(gu_sprite_vertex *v, const omf_rect *screen, int tw,
 }
 
 static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *vp,
-                     bool load_clut, bool bind_texture) {
+                     bool load_clut, bool bind_texture, bool indexed) {
     gu_texture *tex = &ctx->textures[cmd->texture];
 #ifdef PSP_GU_PROFILE
     ++ctx->profile_sprite_draws;
@@ -735,7 +748,12 @@ static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *v
 #endif
     if(load_clut) {
         sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
+#ifdef PSP_GU_APPROX_EFFECTS
+        sceGuClutLoad(32, indexed ? ctx->indexed_clut[cmd->clut] : ctx->clut_storage[cmd->clut]);
+#else
+        (void)indexed;
         sceGuClutLoad(32, ctx->clut_storage[cmd->clut]);
+#endif
     }
     if(bind_texture) {
 #ifdef PSP_GU_APPROX_EFFECTS
@@ -1076,15 +1094,113 @@ static void gpu_draw_cpu_frame(gu_context *ctx, const omf_rect *vp) {
 }
 
 #ifdef PSP_GU_APPROX_EFFECTS
-// Convert disjoint affected tiles before GU starts consuming the texture.
-// A single 512x256 scratch texture holds their absolute logical coordinates.
+// Render the effect-free scene prefix into a third, index-coded RGBA target.
+// The 320x200 palette indices are retained on the CPU until this prefix
+// changes, so the extra GPU pass and readback occur only on cache misses.
+// Later effects still use the exact indexed rules in the existing tile path.
+// The destination-index transform itself cannot be implemented in GU blend.
+_Static_assert(2 * FRAME_BYTES + 512 * 256 * 4 <= 2 * 1024 * 1024,
+               "Offscreen index target must fit with both PSP display buffers");
+static bool gpu_prepare_exact_prefix(gu_context *ctx) {
+    unsigned prefix = 0;
+    while(prefix < ctx->command_count && ctx->commands[prefix].remap_rounds == 0 &&
+          ctx->commands[prefix].opacity == 255 &&
+          !(ctx->commands[prefix].options & (SPRITE_SHADOW | SPRITE_DARK_TINT | SPRITE_INDEX_ADD)))
+        prefix++;
+    if(prefix == 0 || prefix > PSP_EXACT_PREFIX_MAX_COMMANDS) {
+        ctx->cpu_prefix_valid = false;
+        return false;
+    }
+    bool cache_hit = ctx->cpu_prefix_valid && ctx->cpu_prefix_count == prefix;
+    for(unsigned i = 0; cache_hit && i < prefix; ++i)
+        cache_hit = same_prefix_command(&ctx->cpu_prefix_commands[i], &ctx->commands[i]) &&
+                    ctx->cpu_prefix_guids[i] == ctx->textures[ctx->commands[i].texture].guid;
+    if(cache_hit) {
+#ifdef PSP_GU_PROFILE
+        ctx->cpu_prefix_hits++;
+#endif
+        return true;
+    }
+    ctx->cpu_prefix_valid = false;
+    if(!ctx->cpu_prefix_frame)
+        ctx->cpu_prefix_frame = calloc(GAME_W * GAME_H, sizeof(indexed_pixel));
+    if(!ctx->cpu_prefix_frame) return false;
+#ifdef PSP_GU_PROFILE
+    const uint64_t began = sceKernelGetSystemTimeWide();
+#endif
+    bool loaded[MAX_CLUTS] = {0};
+    for(unsigned i = 0; i < prefix; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        const unsigned ci = cmd->clut;
+        if(ci >= MAX_CLUTS) return false;
+        if(loaded[ci]) continue;
+        loaded[ci] = true;
+        for(int color = 0; color < VGA_PALETTE_SIZE; ++color)
+            ctx->indexed_clut[ci][color] = color == cmd->transparent ? 0u :
+                (0xff000000u | (uint32_t)source_index(ctx, cmd, color));
+        sceKernelDcacheWritebackRange(ctx->indexed_clut[ci], sizeof(ctx->indexed_clut[ci]));
+    }
+    const omf_rect ivp = {0, 0, GAME_W, GAME_H};
+    sceGuStart(GU_DIRECT, ctx->display_list);
+    sceGuDrawBufferList(GU_PSM_8888, (void *)(2 * FRAME_BYTES), BUFFER_PITCH);
+    sceGuScissor(0, 0, GAME_W, GAME_H);
+    sceGuClearColor(0xff000000);
+    sceGuClear(GU_COLOR_BUFFER_BIT);
+    sceGuEnable(GU_BLEND);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    sceGuTexMode(GU_PSM_T8, 0, 0, GU_FALSE);
+    sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+    int last_clut=-1, last_tex=-1;
+    for(unsigned i=0; i<prefix; ++i) {
+        const draw_command *cmd=&ctx->commands[i];
+        bool clut_changed=cmd->clut!=last_clut;
+        bool bind=cmd->texture!=last_tex;
+        last_clut=cmd->clut;
+        last_tex=cmd->texture;
+        gpu_draw(ctx, cmd, &ivp, clut_changed, bind, true);
+    }
+    sceGuDrawBufferList(GU_PSM_8888, ctx->active_draw_buffer, BUFFER_PITCH);
+    sceGuFinish();
+#ifdef PSP_GU_PROFILE
+    const uint64_t wait_start = sceKernelGetSystemTimeWide();
+#endif
+    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+#ifdef PSP_GU_PROFILE
+    ctx->gpu_prefix_sync_us += sceKernelGetSystemTimeWide() - wait_start;
+    const uint64_t read_start = sceKernelGetSystemTimeWide();
+#endif
+    const volatile uint32_t *pixels=(const volatile uint32_t *)
+        ((uintptr_t)sceGeEdramGetAddr() + (uintptr_t)(2 * FRAME_BYTES));
+    for(int y=0;y<GAME_H;++y)
+        for(int x=0;x<GAME_W;++x)
+            ctx->cpu_prefix_frame[y*GAME_W+x]=(indexed_pixel){.index=pixels[y*BUFFER_PITCH+x] & 255u};
+#ifdef PSP_GU_PROFILE
+    ctx->gpu_prefix_read_us += sceKernelGetSystemTimeWide() - read_start;
+#endif
+    for(unsigned i=0;i<prefix;++i) {
+        ctx->cpu_prefix_commands[i]=ctx->commands[i];
+        ctx->cpu_prefix_guids[i]=ctx->textures[ctx->commands[i].texture].guid;
+    }
+#ifdef PSP_GU_PROFILE
+    ctx->cpu_prefix_builds++;
+#endif
+#ifdef PSP_GU_PROFILE
+    ctx->gpu_prefix_total_us += sceKernelGetSystemTimeWide() - began;
+    ctx->gpu_prefix_frames++;
+#endif
+    ctx->cpu_prefix_count=prefix;
+    ctx->cpu_prefix_valid=true;
+    return true;
+}
+
 static bool cpu_prepare_exact_tiles(gu_context *ctx, const uint8_t marked[PSP_EXACT_TILE_COUNT]) {
     if(!ctx->rgba_frame) ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
     if(!ctx->rgba_frame) return false;
 #ifdef PSP_GU_PROFILE
     uint64_t stage_start = sceKernelGetSystemTimeWide();
 #endif
-    cpu_prepare_exact_prefix(ctx);
+    if(!ctx->cpu_prefix_valid)
+        cpu_prepare_exact_prefix(ctx);
 #ifdef PSP_GU_PROFILE
     ctx->exact_prefix_us += sceKernelGetSystemTimeWide() - stage_start;
 #endif
@@ -1151,36 +1267,6 @@ static void finish(void *userdata) {
     const uint64_t gu_start_us = sceKernelGetSystemTimeWide();
 #endif
     flush_palette(ctx);
-#ifdef PSP_GU_APPROX_EFFECTS
-    uint8_t exact_tiles[PSP_EXACT_TILE_COUNT];
-    bool exact_tiles_ready = false;
-#ifdef PSP_GU_PROFILE
-    const uint64_t scan_start = sceKernelGetSystemTimeWide();
-#endif
-    const unsigned exact_tile_count = ctx->needs_cpu ? 0 : exact_effect_tiles(ctx, exact_tiles);
-#ifdef PSP_GU_PROFILE
-    ctx->exact_tile_scan_us += sceKernelGetSystemTimeWide() - scan_start;
-#endif
-    if(exact_tile_count) {
-        if(exact_tile_count <= PSP_EXACT_TILE_LIMIT) {
-#ifdef PSP_GU_PROFILE
-            const uint64_t exact_start = sceKernelGetSystemTimeWide();
-#endif
-            exact_tiles_ready = cpu_prepare_exact_tiles(ctx, exact_tiles);
-#ifdef PSP_GU_PROFILE
-            if(exact_tiles_ready) {
-                ++ctx->exact_effect_frames;
-                ctx->exact_effect_pixels += exact_tile_count * PSP_EXACT_TILE_SIZE * PSP_EXACT_TILE_SIZE;
-                ctx->exact_effect_cpu_us += sceKernelGetSystemTimeWide() - exact_start;
-            }
-#endif
-        } else {
-#ifdef PSP_GU_PROFILE
-            ++ctx->skipped_effect_frames;
-#endif
-        }
-    }
-#endif
     // CLUT variants cannot represent destination-index remap. Replay precisely
     // through the indexed CPU buffer for such frames, not a lossy RGB overlay.
     if(!ctx->needs_cpu) {
@@ -1213,6 +1299,42 @@ static void finish(void *userdata) {
 #endif
         }
     }
+#ifdef PSP_GU_APPROX_EFFECTS
+    uint8_t exact_tiles[PSP_EXACT_TILE_COUNT];
+    bool exact_tiles_ready = false;
+#ifdef PSP_GU_PROFILE
+    const uint64_t scan_start = sceKernelGetSystemTimeWide();
+#endif
+    const unsigned exact_tile_count = ctx->needs_cpu ? 0 : exact_effect_tiles(ctx, exact_tiles);
+#ifdef PSP_GU_PROFILE
+    ctx->exact_tile_scan_us += sceKernelGetSystemTimeWide() - scan_start;
+#endif
+    if(exact_tile_count) {
+        if(exact_tile_count <= PSP_EXACT_TILE_LIMIT) {
+#ifdef PSP_GU_PROFILE
+            const uint64_t exact_start = sceKernelGetSystemTimeWide();
+#endif
+            if(!gpu_prepare_exact_prefix(ctx)) {
+                ctx->cpu_prefix_valid = false;
+#ifdef PSP_GU_PROFILE
+                ++ctx->gpu_prefix_fallback;
+#endif
+            }
+            exact_tiles_ready = cpu_prepare_exact_tiles(ctx, exact_tiles);
+#ifdef PSP_GU_PROFILE
+            if(exact_tiles_ready) {
+                ++ctx->exact_effect_frames;
+                ctx->exact_effect_pixels += exact_tile_count * PSP_EXACT_TILE_SIZE * PSP_EXACT_TILE_SIZE;
+                ctx->exact_effect_cpu_us += sceKernelGetSystemTimeWide() - exact_start;
+            }
+#endif
+        } else {
+#ifdef PSP_GU_PROFILE
+            ++ctx->skipped_effect_frames;
+#endif
+        }
+    }
+#endif
     if(ctx->needs_cpu && !cpu_replay(ctx)) {
         log_error("PSP GU CPU effect buffer unavailable");
         return;
@@ -1260,7 +1382,7 @@ static void finish(void *userdata) {
                 last_texture = cmd->texture;
                 last_shadow = shadow;
             }
-            gpu_draw(ctx, cmd, &vp, change, bind_texture);
+            gpu_draw(ctx, cmd, &vp, change, bind_texture, false);
         }
 #ifdef PSP_GU_APPROX_EFFECTS
         if(exact_tiles_ready) gpu_draw_exact_tiles(ctx, &vp, exact_tiles, exact_tile_count);
@@ -1280,7 +1402,11 @@ static void finish(void *userdata) {
     // VSync OFF, cap native presentation to VBlank: otherwise the engine can
     // run thousands of frames per second in PPSSPP and animate too quickly.
     sceDisplayWaitVblankStart();
+#ifdef PSP_GU_APPROX_EFFECTS
+    ctx->active_draw_buffer = sceGuSwapBuffers();
+#else
     sceGuSwapBuffers();
+#endif
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_swap_ms = omf_time_ms();
     const uint64_t gu_swap_us = sceKernelGetSystemTimeWide();
@@ -1323,6 +1449,14 @@ static void finish(void *userdata) {
                  ctx->profile_background_draws, ctx->profile_texture_binds,
                  ctx->profile_texel_references, ctx->profile_texture_misses);
 #ifdef PSP_GU_APPROX_EFFECTS
+        log_info("PSP GPU PREFIX (600 frames): builds=%lu avg=%lluus sync=%lluus read=%lluus fallback=%lu",
+                 ctx->gpu_prefix_frames,
+                 (unsigned long long)(ctx->gpu_prefix_total_us / (ctx->gpu_prefix_frames ? ctx->gpu_prefix_frames : 1)),
+                 (unsigned long long)(ctx->gpu_prefix_sync_us / (ctx->gpu_prefix_frames ? ctx->gpu_prefix_frames : 1)),
+                 (unsigned long long)(ctx->gpu_prefix_read_us / (ctx->gpu_prefix_frames ? ctx->gpu_prefix_frames : 1)),
+                 ctx->gpu_prefix_fallback);
+        ctx->gpu_prefix_total_us=ctx->gpu_prefix_sync_us=ctx->gpu_prefix_read_us=0;
+        ctx->gpu_prefix_frames = ctx->gpu_prefix_fallback = 0;
         log_info("PSP GU exact effects (600 frames): exact=%lu pixels=%lu skipped=%lu replay-us=%llu",
                  ctx->exact_effect_frames, ctx->exact_effect_pixels, ctx->skipped_effect_frames,
                  (unsigned long long)ctx->exact_effect_cpu_us);
