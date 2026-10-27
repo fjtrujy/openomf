@@ -83,6 +83,7 @@ typedef struct {
     unsigned long used_frame;
     uint8_t *data; /* immutable snapshot of one source surface GUID */
     uint8_t *shadow_mask; /* cached four-tap coverage values */
+    int shadow_mask_transparent; /* source transparent index used for cache */
 } gu_texture;
 
 typedef struct {
@@ -135,6 +136,18 @@ typedef struct {
     _Alignas(16) uint32_t clut_storage[MAX_CLUTS][VGA_PALETTE_SIZE];
     clut_variant cluts[MAX_CLUTS];
 #ifdef PSP_GU_APPROX_EFFECTS
+    // Direct palette-index mapping for the exact CPU tile suffix. Built with
+    // its CLUT entry on demand, not on ordinary 222 MHz GU-only frames.
+    uint8_t exact_source_lut[MAX_CLUTS][VGA_PALETTE_SIZE];
+    uint8_t exact_source_lut_valid[MAX_CLUTS];
+    // Final remap chain depends only on the underlying index and encoded
+    // destination remap. Generate each 256-byte row lazily.
+    uint8_t exact_remap_lut[256][VGA_PALETTE_SIZE];
+    uint8_t exact_remap_valid[256];
+    bool exact_tile_drawing;
+#ifdef PSP_GU_PROFILE
+    unsigned long exact_lut_hits, exact_lut_builds, exact_shadow_mask_pixels;
+#endif
     // Temporary index-coded CLUTs and draw-buffer tracking for the intro's
     // infrequently changing, effect-free scene prefix.
     _Alignas(16) uint32_t indexed_clut[MAX_CLUTS][VGA_PALETTE_SIZE];
@@ -242,6 +255,9 @@ static void flush_palette(gu_context *ctx) {
         memcpy(&ctx->remaps, remaps, sizeof(ctx->remaps));
         vga_state_mark_remaps_flushed();
         ctx->cpu_prefix_valid = false;
+#ifdef PSP_GU_APPROX_EFFECTS
+        memset(ctx->exact_remap_valid, 0, sizeof(ctx->exact_remap_valid));
+#endif
         changed = true;
     }
     // A CLUT contains final RGB values, not indices. A palette/remap change
@@ -503,7 +519,16 @@ static void draw(void *userdata, const surface *src, omf_rect *rect, int remap_o
 
 #ifdef PSP_GU_APPROX_EFFECTS
 static bool ensure_shadow_mask(gu_context *ctx, gu_texture *tex, int transparent) {
-    if(tex->shadow_mask) return true;
+    if(tex->shadow_mask && tex->shadow_mask_transparent == transparent) return true;
+    if(tex->shadow_mask) {
+        // Same surface can be drawn with a different transparency index.
+        // Invalidate the cached coverage mask rather than reusing wrong data.
+        const size_t old_bytes = (size_t)tex->pitch * tex->tex_h;
+        free(tex->shadow_mask);
+        tex->shadow_mask = NULL;
+        tex->bytes -= old_bytes;
+        ctx->texture_bytes -= old_bytes;
+    }
     // Precompute the coverage used by OpenOMF's four-tap shadow shader ONCE
     // rather than evaluating its mask at every destination pixel every frame.
     const size_t bytes = (size_t)tex->pitch * tex->tex_h;
@@ -570,6 +595,7 @@ static bool ensure_shadow_mask(gu_context *ctx, gu_texture *tex, int transparent
     }
     sceKernelDcacheWritebackRange(mask, bytes);
     tex->shadow_mask = mask;
+    tex->shadow_mask_transparent = transparent;
     tex->bytes += bytes;
     ctx->texture_bytes += bytes;
     return true;
@@ -663,6 +689,10 @@ static int get_clut(gu_context *ctx, const draw_command *cmd) {
     clut_variant *v = &ctx->cluts[slot];
     v->last_used_frame = ctx->frame_no;
     ctx->clut_hints[hint_key] = (uint8_t)(slot + 1);
+#ifdef PSP_GU_APPROX_EFFECTS
+    // The slot may have been recycled for a different remap variant.
+    ctx->exact_source_lut_valid[slot] = 0;
+#endif
 #ifdef PSP_GU_PROFILE
     ++ctx->clut_built;
 #endif
@@ -840,11 +870,19 @@ static void cpu_draw_clipped(gu_context *ctx, const draw_command *cmd, const omf
             if(!use_cached_x && (cmd->flip & FLIP_HORIZONTAL)) sx = tex->w - 1 - sx;
             int index = tex->data[sy * tex->pitch + sx];
             if(cmd->options & SPRITE_SHADOW) {
-                int coverage = 0;
-                for(int k = -1; k <= 2; k++) {
-                    int ty = sy + k;
-                    if(ty >= 0 && ty < tex->h && tex->data[ty * tex->pitch + sx] != cmd->transparent)
-                        coverage++;
+                int coverage;
+                if(tex->shadow_mask && tex->shadow_mask_transparent == cmd->transparent) {
+                    coverage = tex->shadow_mask[sy * tex->pitch + sx];
+#if defined(PSP_GU_PROFILE) && defined(PSP_GU_APPROX_EFFECTS)
+                    if(ctx->exact_tile_drawing) ++ctx->exact_shadow_mask_pixels;
+#endif
+                } else {
+                    coverage = 0;
+                    for(int k = -1; k <= 2; k++) {
+                        int ty = sy + k;
+                        if(ty >= 0 && ty < tex->h && tex->data[ty * tex->pitch + sx] != cmd->transparent)
+                            coverage++;
+                    }
                 }
                 if(!coverage) continue;
                 index = coverage;
@@ -853,7 +891,12 @@ static void cpu_draw_clipped(gu_context *ctx, const draw_command *cmd, const omf
             }
             static const uint8_t bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
             if(cmd->opacity < 255 && bayer[(x & 3) | ((y & 3) << 2)] * 16 > cmd->opacity) continue;
-            index = source_index(ctx, cmd, index);
+#ifdef PSP_GU_APPROX_EFFECTS
+            if(ctx->exact_tile_drawing)
+                index = ctx->exact_source_lut[cmd->clut][index];
+            else
+#endif
+                index = source_index(ctx, cmd, index);
             indexed_pixel *p = &ctx->cpu_frame[y * GAME_W + x];
             if(cmd->options & SPRITE_DARK_TINT) {
                 p->remap = cmd->remap_offset + MAGIC_REMAP_ROUNDS * VGA_REMAP_COUNT;
@@ -1201,6 +1244,33 @@ static bool gpu_prepare_exact_prefix(gu_context *ctx) {
     return true;
 }
 
+// Indexed shadow remaps frequently resolve the same 8-bit remap code for
+// thousands of pixels. Build only the rows needed this scene, and invalidate
+// whenever the VGA remap tables change.
+static int cpu_resolve_exact(gu_context *ctx, const indexed_pixel *p) {
+    if(p->dark || p->add || (ctx->framebuffer_options & FBUFOPT_CREDITS))
+        return cpu_resolve(ctx, p);
+    const uint8_t remap = p->remap;
+    if(remap == 0) return iclamp(p->index);
+    if(!ctx->exact_remap_valid[remap]) {
+        const int rounds = remap / VGA_REMAP_COUNT;
+        const int row = remap % VGA_REMAP_COUNT;
+        for(int original = 0; original < VGA_PALETTE_SIZE; ++original) {
+            int idx = original;
+            for(int i = 0; i < rounds; ++i) idx = remap_index(ctx, idx, row);
+            ctx->exact_remap_lut[remap][original] = (uint8_t)iclamp(idx);
+        }
+        ctx->exact_remap_valid[remap] = 1;
+#ifdef PSP_GU_PROFILE
+        ++ctx->exact_lut_builds;
+#endif
+    }
+#ifdef PSP_GU_PROFILE
+    ++ctx->exact_lut_hits;
+#endif
+    return ctx->exact_remap_lut[remap][iclamp(p->index)];
+}
+
 static bool cpu_prepare_exact_tiles(gu_context *ctx, const uint8_t marked[PSP_EXACT_TILE_COUNT]) {
     if(!ctx->rgba_frame) ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
     if(!ctx->rgba_frame) return false;
@@ -1209,6 +1279,18 @@ static bool cpu_prepare_exact_tiles(gu_context *ctx, const uint8_t marked[PSP_EX
 #endif
     if(!ctx->cpu_prefix_valid)
         cpu_prepare_exact_prefix(ctx);
+    // Generate indexed source translations only if an exact tile actually
+    // needs the corresponding CLUT variant. Most 222 MHz combat frames never
+    // enter this path, so normal GU palette preparation stays unchanged.
+    const unsigned first = ctx->cpu_prefix_valid ? ctx->cpu_prefix_count : 0;
+    for(unsigned i = first; i < ctx->command_count; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        const unsigned clut = cmd->clut;
+        if(ctx->exact_source_lut_valid[clut]) continue;
+        for(int index = 0; index < VGA_PALETTE_SIZE; ++index)
+            ctx->exact_source_lut[clut][index] = (uint8_t)source_index(ctx, cmd, index);
+        ctx->exact_source_lut_valid[clut] = 1;
+    }
 #ifdef PSP_GU_PROFILE
     ctx->exact_prefix_us += sceKernelGetSystemTimeWide() - stage_start;
 #endif
@@ -1218,14 +1300,17 @@ static bool cpu_prepare_exact_tiles(gu_context *ctx, const uint8_t marked[PSP_EX
 #ifdef PSP_GU_PROFILE
         stage_start = sceKernelGetSystemTimeWide();
 #endif
-        if(!cpu_replay_region(ctx, &r)) return false;
+        ctx->exact_tile_drawing = true;
+        bool replayed = cpu_replay_region(ctx, &r);
+        ctx->exact_tile_drawing = false;
+        if(!replayed) return false;
 #ifdef PSP_GU_PROFILE
         ctx->exact_replay_us += sceKernelGetSystemTimeWide() - stage_start;
         stage_start = sceKernelGetSystemTimeWide();
 #endif
         for(int y = r.y; y < r.y + r.h; ++y) {
             for(int x = r.x; x < r.x + r.w; ++x) {
-                const int index = cpu_resolve(ctx, &ctx->cpu_frame[y * GAME_W + x]);
+                const int index = cpu_resolve_exact(ctx, &ctx->cpu_frame[y * GAME_W + x]);
                 const vga_color c = ctx->palette.colors[index];
                 ctx->rgba_frame[y * 512 + x] = 0xff000000u |
                     ((uint32_t)c.b << 16) | ((uint32_t)c.g << 8) | c.r;
@@ -1484,6 +1569,9 @@ static void finish(void *userdata) {
         ctx->exact_effect_cpu_us = 0;
         log_info("PSP GU indexed prefix (600 frames): hits=%lu builds=%lu",
                  ctx->cpu_prefix_hits, ctx->cpu_prefix_builds);
+        log_info("PSP exact shadow LUT (600 frames): remap-lookups=%lu generated-rows=%lu cached-mask-pixels=%lu",
+                 ctx->exact_lut_hits, ctx->exact_lut_builds, ctx->exact_shadow_mask_pixels);
+        ctx->exact_lut_hits = ctx->exact_lut_builds = ctx->exact_shadow_mask_pixels = 0;
         log_info("PSP GU exact stage (600 frames): scan=%lluus prefix=%lluus replay=%lluus convert=%lluus",
                  (unsigned long long)ctx->exact_tile_scan_us,
                  (unsigned long long)ctx->exact_prefix_us,
@@ -1541,6 +1629,9 @@ static void scene_change(void *userdata) {
     ctx->clut_count = 0;
     memset(ctx->clut_hints, 0, sizeof(ctx->clut_hints));
     ctx->cpu_prefix_valid = false;
+#ifdef PSP_GU_APPROX_EFFECTS
+    memset(ctx->exact_remap_valid, 0, sizeof(ctx->exact_remap_valid));
+#endif
 }
 static void draw_atlas(void *userdata, bool enabled) {
     (void)userdata; (void)enabled;
