@@ -173,9 +173,14 @@ per-frame CPU sprite rasterization.
 
 The PSP has no programmable fragment shader, so OpenOMF's effects that alter
 the *existing framebuffer's palette index* cannot be reproduced by normal
-fixed-function blending. With `PSP_GU_APPROX_EFFECTS=ON` (default), shadows,
-dark tint and remap overlays use native GU alpha approximations. Their colors
-will differ from the desktop OpenGL reference. For fidelity comparisons:
+fixed-function blending. With `PSP_GU_APPROX_EFFECTS=ON` (default), most shadows
+and dark tints use fast native GU alpha approximations. The OMF/2097 intro's
+bright destination-index remap now reconstructs affected 16×16 tiles using
+exact indexed CPU rules, with an indexed-background cache and a strict
+workload budget; oversized effects still use GU approximation. See
+[EXACT_INTRO_EFFECTS.md](EXACT_INTRO_EFFECTS.md) for the physical PSP
+benchmarks and remaining fidelity limitations. To compare against the full
+indexed software path:
 
 ```sh
 psp-cmake -S ports/psp -B build/psp-exact -G Ninja \

@@ -121,6 +121,13 @@ hooks were removed from the source after testing.
 
 ## Optional follow-up checks
 
+**October 27 follow-up:** A bounded, intro-only exact indexed tile compositor
+has been implemented and validated without slowing ordinary combat. It
+restores red/orange electrical highlights and reproduces the full indexed
+software result in a 10,112-pixel diagnostic check. See
+[EXACT_INTRO_EFFECTS.md](EXACT_INTRO_EFFECTS.md) for implementation details,
+222/333 MHz physical PSP timings, and the remaining approximation cases.
+
 - Confirm that the bright-GU approximation looks correct on physical PSP;
   compare the timing of the electric flash without introducing stalls.
 - Consider better approximations for highlight brightness and texture detail
