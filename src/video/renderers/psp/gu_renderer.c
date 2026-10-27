@@ -41,6 +41,7 @@
 #define FRAME_BYTES (BUFFER_PITCH * SCREEN_H * 4)
 #define GU_LIST_WORDS 262144
 #define MAX_TEXTURES 256
+#define TEXTURE_HINTS 512
 #define MAX_TEXTURE_BYTES (4u * 1024u * 1024u)
 #define MAX_COMMANDS 4096
 #define MAX_CLUTS 64
@@ -62,6 +63,7 @@ typedef struct {
 
 typedef struct {
     uint16_t texture;
+    uint16_t clut;
     int transparent;
     omf_rect dst;
     int remap_offset, remap_rounds;
@@ -95,6 +97,9 @@ typedef struct {
     unsigned long frame_no, use_clock;
     size_t texture_bytes;
     gu_texture textures[MAX_TEXTURES];
+    // Direct-mapped accelerator; entries are always verified against the
+    // immutable texture GUID and dimensions, so evicted slots stay safe.
+    uint16_t texture_hints[TEXTURE_HINTS];
     draw_command commands[MAX_COMMANDS];
     unsigned command_count;
     unsigned long gpu_frames, cpu_frames, shadow_frames, remap_frames, tint_frames, additive_frames;
@@ -278,14 +283,32 @@ static int next_pow2(int n) {
     return r;
 }
 
+static unsigned texture_hint_key(const surface *src) {
+    uint32_t h = (uint32_t)src->guid * 2654435761u;
+    h ^= (uint32_t)src->w * 2246822519u;
+    h ^= (uint32_t)src->h * 3266489917u;
+    return (h ^ (h >> 16)) & (TEXTURE_HINTS - 1);
+}
+
 static gu_texture *get_texture(gu_context *ctx, const surface *src) {
     if(src->w <= 0 || src->h <= 0 || !src->data) {
         return NULL;
     }
     ctx->use_clock++;
+    const unsigned hint_key = texture_hint_key(src);
+    const unsigned hint_slot = ctx->texture_hints[hint_key];
+    if(hint_slot) {
+        gu_texture *tex = &ctx->textures[hint_slot - 1];
+        if(tex->data && tex->guid == src->guid && tex->w == src->w && tex->h == src->h) {
+            tex->recent = ctx->use_clock;
+            tex->used_frame = ctx->frame_no;
+            return tex;
+        }
+    }
     for(int i = 0; i < MAX_TEXTURES; i++) {
         gu_texture *tex = &ctx->textures[i];
         if(tex->data && tex->guid == src->guid && tex->w == src->w && tex->h == src->h) {
+            ctx->texture_hints[hint_key] = (uint16_t)(i + 1);
             tex->recent = ctx->use_clock;
             tex->used_frame = ctx->frame_no;
             return tex;
@@ -347,6 +370,7 @@ static gu_texture *get_texture(gu_context *ctx, const surface *src) {
     tex->recent = ctx->use_clock;
     tex->used_frame = ctx->frame_no;
     ctx->texture_bytes += bytes;
+    ctx->texture_hints[hint_key] = (uint16_t)(slot + 1);
     return tex;
 }
 
@@ -528,26 +552,25 @@ static void sprite_vertices(gu_sprite_vertex *v, const omf_rect *screen, int tw,
     };
 }
 
-static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *vp, int clut,
-                     bool load_clut) {
+static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *vp,
+                     bool load_clut, bool bind_texture) {
     gu_texture *tex = &ctx->textures[cmd->texture];
     if(load_clut) {
         sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
-        sceGuClutLoad(32, ctx->clut_storage[clut]);
+        sceGuClutLoad(32, ctx->clut_storage[cmd->clut]);
     }
-    sceGuTexMode(GU_PSM_T8, 0, 0, 0);
+    if(bind_texture) {
 #ifdef PSP_GU_APPROX_EFFECTS
-    if(cmd->options & SPRITE_SHADOW) {
-        // The mask was prepared before sceGuStart. Do not allocate or drop
-        // a draw command while a GPU display list is being constructed.
-        sceGuTexImage(0, tex->pitch, tex->tex_h, tex->pitch, tex->shadow_mask);
-    } else {
-        sceGuTexImage(0, tex->pitch, tex->tex_h, tex->pitch, tex->data);
-    }
+        if(cmd->options & SPRITE_SHADOW) {
+            // Shadow masks are separate T8 textures even if the GUID matches.
+            sceGuTexImage(0, tex->pitch, tex->tex_h, tex->pitch, tex->shadow_mask);
+        } else {
+            sceGuTexImage(0, tex->pitch, tex->tex_h, tex->pitch, tex->data);
+        }
 #else
-    sceGuTexImage(0, tex->pitch, tex->tex_h, tex->pitch, tex->data);
+        sceGuTexImage(0, tex->pitch, tex->tex_h, tex->pitch, tex->data);
 #endif
-    sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+    }
     sceGuColor(((unsigned)(uint8_t)cmd->opacity << 24) | 0x00ffffffu);
     // Preserve the GL3 logical coordinate system; the PSP scales at the end.
     omf_rect dst = {
@@ -694,10 +717,12 @@ static void finish(void *userdata) {
     // through the indexed CPU buffer for such frames, not a lossy RGB overlay.
     if(!ctx->needs_cpu) {
         for(unsigned i = 0; i < ctx->command_count; i++) {
-            if(get_clut(ctx, &ctx->commands[i]) < 0) {
+            int clut = get_clut(ctx, &ctx->commands[i]);
+            if(clut < 0) {
                 ctx->needs_cpu = true;
                 break;
             }
+            ctx->commands[i].clut = (uint16_t)clut;
 #ifdef PSP_GU_APPROX_EFFECTS
             const draw_command *cmd = &ctx->commands[i];
             if(cmd->options & SPRITE_SHADOW) {
@@ -739,14 +764,24 @@ static void finish(void *userdata) {
     } else {
         ctx->gpu_frames++;
         int last_clut = -1;
+        int last_texture = -1;
+        bool last_shadow = false;
+        sceGuTexMode(GU_PSM_T8, 0, 0, 0);
+        sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
         for(unsigned i = 0; i < ctx->command_count; i++) {
             const draw_command *cmd = &ctx->commands[i];
             // Palette changes are handled with GU CLUT loads, not framebuffer
             // conversions or texture uploads.
-            int clut = get_clut(ctx, cmd);
+            int clut = cmd->clut;
             bool change = clut != last_clut;
             if(change) last_clut = clut;
-            gpu_draw(ctx, cmd, &vp, clut, change);
+            const bool shadow = !!(cmd->options & SPRITE_SHADOW);
+            const bool bind_texture = cmd->texture != last_texture || shadow != last_shadow;
+            if(bind_texture) {
+                last_texture = cmd->texture;
+                last_shadow = shadow;
+            }
+            gpu_draw(ctx, cmd, &vp, change, bind_texture);
         }
     }
     sceGuFinish();

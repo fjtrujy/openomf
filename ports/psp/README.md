@@ -147,6 +147,11 @@ On PSP hardware, `PSP_CLOCK_333=ON` (default) selects the PSP's supported
 previous CPU and bus clocks on normal exit. Higher clocks consume more
 power; rebuild with `-DPSP_CLOCK_333=OFF` to respect the launcher's clocks.
 
+The October 27 physical PSP clock comparison and GU cache/state optimizations
+are documented in [GU_OPTIMIZATION_BENCHMARK.md](GU_OPTIMIZATION_BENCHMARK.md).
+On the same device, 222 MHz averaged below 50 FPS after warm-up while 333 MHz
+averaged near 58 FPS; PPSSPP alone did not predict this hardware difference.
+
 ## Rendering architecture
 
 The preferred **PSP GU** backend uploads 8-bit indexed sprite textures and
