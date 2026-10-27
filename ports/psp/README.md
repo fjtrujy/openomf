@@ -179,8 +179,14 @@ bright destination-index remap now reconstructs affected 16×16 tiles using
 exact indexed CPU rules, with an indexed-background cache and a strict
 workload budget; oversized effects still use GU approximation. See
 [EXACT_INTRO_EFFECTS.md](EXACT_INTRO_EFFECTS.md) for the physical PSP
-benchmarks and remaining fidelity limitations. To compare against the full
-indexed software path:
+benchmarks and remaining fidelity limitations. A subsequent investigation
+of persistent CPU indexed mirrors, dirty-tile updates, and a GPU index-coded
+sidecar is documented in
+[INDEXED_FRAMEBUFFER_INVESTIGATION.md](INDEXED_FRAMEBUFFER_INVESTIGATION.md).
+Its measurements rule out a full-time CPU mirror at 222 MHz and identify a
+selective GPU index-target approach as a possible future, independently
+validated milestone; no incomplete GPU sidecar is enabled in this build.
+To compare against the full indexed software path:
 
 ```sh
 psp-cmake -S ports/psp -B build/psp-exact -G Ninja \
