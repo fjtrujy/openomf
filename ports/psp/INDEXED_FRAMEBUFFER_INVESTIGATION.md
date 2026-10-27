@@ -24,6 +24,12 @@ bounded CPU correction per ordered group of effects. It must be validated at
 The existing native GU renderer, 32-texel advanced blit and 16×16 intro exact
 patching remain the shipping implementation.
 
+**Follow-up milestone:** [GPU_INDEX_PREFIX.md](GPU_INDEX_PREFIX.md)
+implements an *on-demand* GPU prefix snapshot for the intro's exact tiles,
+with physical 222/333 MHz performance and pixel-reference validation. It
+does not enable the incomplete all-frame GPU index sidecar or general
+exact combat effects.
+
 ## Technical constraints
 
 The current GU renderer consumes immutable T8 indexed sprite textures and

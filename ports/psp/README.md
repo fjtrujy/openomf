@@ -186,6 +186,10 @@ sidecar is documented in
 Its measurements rule out a full-time CPU mirror at 222 MHz and identify a
 selective GPU index-target approach as a possible future, independently
 validated milestone; no incomplete GPU sidecar is enabled in this build.
+**Follow-up:** [GPU_INDEX_PREFIX.md](GPU_INDEX_PREFIX.md) documents the
+implemented on-demand GPU indexed-prefix cache used only for the intro's
+bounded exact remap tiles. It removes expensive CPU background reconstruction
+without performing an extra GPU pass during ordinary combat.
 To compare against the full indexed software path:
 
 ```sh
