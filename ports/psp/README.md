@@ -194,6 +194,11 @@ without performing an extra GPU pass during ordinary combat.
 documents automatic exact indexed combat shadows for small effect regions at
 333 MHz. At 222 MHz, and for larger or mixed-effect regions, the GU retains
 its fast blending approximation to preserve gameplay performance.
+**Performance follow-up:**
+[EXACT_TILE_LUT_OPTIMIZATION.md](EXACT_TILE_LUT_OPTIMIZATION.md) documents
+reuse of cached shadow coverage and indexed remap lookup tables, reducing
+the measured exact-tile preparation cost without broadening the 16-tile
+combat budget or changing the fast 222 MHz rendering policy.
 To compare against the full indexed software path:
 
 ```sh

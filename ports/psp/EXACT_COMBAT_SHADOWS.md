@@ -111,6 +111,12 @@ change. A future improvement needs genuinely different GPU composition,
 more efficient ordered-region tracking, or a dedicated PSP VFPU-assisted
 pixel path before broadening exact combat effects without FPS regressions.
 
+**Follow-up optimization:**
+[EXACT_TILE_LUT_OPTIMIZATION.md](EXACT_TILE_LUT_OPTIMIZATION.md) describes
+the subsequently implemented reuse of existing shadow masks and lazy
+palette-index remap lookups. The exact small-combat-shadow budget remains
+16 tiles at 333 MHz after a wider 24-tile physical PSP comparison.
+
 ### Isolated local evidence
 
 - `build/psp-combat-effects-investigation/audit222/save/openomf.log`
