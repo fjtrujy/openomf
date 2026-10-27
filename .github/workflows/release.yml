@@ -17,7 +17,7 @@ jobs:
         - { arch: "x64", build_languages: "ON" }
         - { arch: "arm64", build_languages: "OFF" }
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build MSVC binary
@@ -30,7 +30,7 @@ jobs:
     name: Build Ubuntu 26.04
     runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build Ubuntu binary
@@ -40,7 +40,7 @@ jobs:
     name: Build AppImage
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
     - name: Build Ubuntu binary
       uses: ./.github/actions/build_appimage
 
@@ -48,7 +48,7 @@ jobs:
     name: Build macos-14
     runs-on: macos-14
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build MacOS ARM binary
@@ -59,7 +59,7 @@ jobs:
     name: Roll a release
     runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
 

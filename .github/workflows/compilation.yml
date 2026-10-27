@@ -20,7 +20,7 @@ jobs:
       clang-version: '22'
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-26.04
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
         uses: Eeems-Org/apt-cache-action@v1.5
@@ -91,7 +91,7 @@ jobs:
     name: Run Windows unit tests
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -130,7 +130,7 @@ jobs:
     name: MIN_LIB_BUILD Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -173,7 +173,7 @@ jobs:
         - { arch: "x64", build_languages: "ON" }
         - { arch: "arm64", build_languages: "OFF" }
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build MSVC binary
@@ -189,7 +189,7 @@ jobs:
     name: Build Ubuntu 26.04
     runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build Ubuntu binary
@@ -202,7 +202,7 @@ jobs:
     name: Build AppImage
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build AppImage
@@ -215,7 +215,7 @@ jobs:
     name: Build macos-14
     runs-on: macos-14
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build MacOS ARM binary
@@ -228,7 +228,7 @@ jobs:
     name: Check MinGW-w64 cross
     runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
     - name: Build Mingw-w64 binary
@@ -244,7 +244,7 @@ jobs:
     runs-on: ubuntu-26.04
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -256,7 +256,7 @@ jobs:
         path: artifacts/
 
     - name: Advance tag
-      uses: actions/github-script@v8
+      uses: actions/github-script@v9
       with:
         github-token: ${{secrets.GITHUB_TOKEN}}
         script: |
