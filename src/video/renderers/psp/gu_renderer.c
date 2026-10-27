@@ -57,6 +57,17 @@
 #define PSP_GU_BLIT_MIN_WIDTH 128
 #define PSP_GU_BLIT_MIN_HEIGHT 64
 
+// The GE can only blend RGBA, not remap the palette index already behind a
+// sprite. Reconstruct small effect regions in indexed colors, then replace
+// only their final pixels. Larger regions keep the existing fast GU path.
+#define PSP_EXACT_EFFECT_MAX_PIXELS (GAME_W * GAME_H / 4)
+#define PSP_EXACT_TILE_SIZE 16
+#define PSP_EXACT_TILE_COLS ((GAME_W + PSP_EXACT_TILE_SIZE - 1) / PSP_EXACT_TILE_SIZE)
+#define PSP_EXACT_TILE_ROWS ((GAME_H + PSP_EXACT_TILE_SIZE - 1) / PSP_EXACT_TILE_SIZE)
+#define PSP_EXACT_TILE_COUNT (PSP_EXACT_TILE_COLS * PSP_EXACT_TILE_ROWS)
+#define PSP_EXACT_TILE_LIMIT (PSP_EXACT_EFFECT_MAX_PIXELS / (PSP_EXACT_TILE_SIZE * PSP_EXACT_TILE_SIZE))
+#define PSP_EXACT_PREFIX_MAX_COMMANDS 16
+
 #if VGA_PALETTE_SIZE != 256
 #error "PSP GU T8 textures require OpenOMF's 256-color palette build"
 #endif
@@ -131,7 +142,20 @@ typedef struct {
     unsigned long profile_texture_binds, profile_texel_references, profile_texture_misses;
 #endif
     indexed_pixel *cpu_frame;
+    indexed_pixel *cpu_prefix_frame;
+    draw_command cpu_prefix_commands[PSP_EXACT_PREFIX_MAX_COMMANDS];
+    unsigned cpu_prefix_guids[PSP_EXACT_PREFIX_MAX_COMMANDS];
+    unsigned cpu_prefix_count;
+    bool cpu_prefix_valid;
+#ifdef PSP_GU_PROFILE
+    unsigned long cpu_prefix_hits, cpu_prefix_builds;
+    uint64_t exact_tile_scan_us, exact_prefix_us, exact_replay_us, exact_convert_us;
+#endif
     uint32_t *rgba_frame;
+#ifdef PSP_GU_PROFILE
+    unsigned long exact_effect_frames, exact_effect_pixels, skipped_effect_frames;
+    uint64_t exact_effect_cpu_us;
+#endif
     omf_rect offscreen_area;
     video_screenshot_signal screenshot;
 } gu_context;
@@ -185,6 +209,7 @@ static void destroy(renderer *r) {
     if(!ctx) return;
     clear_textures(ctx);
     free(ctx->cpu_frame);
+    free(ctx->cpu_prefix_frame);
     free(ctx->rgba_frame);
     free(ctx);
     r->ctx = NULL;
@@ -202,6 +227,7 @@ static void flush_palette(gu_context *ctx) {
     if(vga_state_is_remap_dirty(&remaps)) {
         memcpy(&ctx->remaps, remaps, sizeof(ctx->remaps));
         vga_state_mark_remaps_flushed();
+        ctx->cpu_prefix_valid = false;
         changed = true;
     }
     // A CLUT contains final RGB values, not indices. A palette/remap change
@@ -764,18 +790,32 @@ static indexed_pixel *cpu_buffer(gu_context *ctx) {
     return ctx->cpu_frame;
 }
 
-static void cpu_draw(gu_context *ctx, const draw_command *cmd) {
+static void cpu_draw_clipped(gu_context *ctx, const draw_command *cmd, const omf_rect *clip) {
     const gu_texture *tex = &ctx->textures[cmd->texture];
     const omf_rect *r = &cmd->dst;
-    const int x0 = imax(0, r->x), y0 = imax(0, r->y);
-    const int x1 = imin(GAME_W, r->x + r->w), y1 = imin(GAME_H, r->y + r->h);
+    const int x0 = imax(clip->x, imax(0, r->x));
+    const int y0 = imax(clip->y, imax(0, r->y));
+    const int x1 = imin(clip->x + clip->w, imin(GAME_W, r->x + r->w));
+    const int y1 = imin(clip->y + clip->h, imin(GAME_H, r->y + r->h));
     if(r->w <= 0 || r->h <= 0) return;
+    // The localized exact path evaluates the same x coordinate on every
+    // row of a 16x16 tile. Computing source coordinates once avoids hundreds
+    // of expensive R4000 integer divisions for each intersecting sprite.
+    int cached_x[PSP_EXACT_TILE_SIZE];
+    const bool use_cached_x = x1 > x0 && x1 - x0 <= PSP_EXACT_TILE_SIZE;
+    if(use_cached_x) {
+        for(int x = x0; x < x1; ++x) {
+            int sx = (x - r->x) * tex->w / r->w;
+            if(cmd->flip & FLIP_HORIZONTAL) sx = tex->w - 1 - sx;
+            cached_x[x - x0] = sx;
+        }
+    }
     for(int y = y0; y < y1; y++) {
         int sy = (y - r->y) * tex->h / r->h;
         if(cmd->flip & FLIP_VERTICAL) sy = tex->h - 1 - sy;
         for(int x = x0; x < x1; x++) {
-            int sx = (x - r->x) * tex->w / r->w;
-            if(cmd->flip & FLIP_HORIZONTAL) sx = tex->w - 1 - sx;
+            int sx = use_cached_x ? cached_x[x - x0] : (x - r->x) * tex->w / r->w;
+            if(!use_cached_x && (cmd->flip & FLIP_HORIZONTAL)) sx = tex->w - 1 - sx;
             int index = tex->data[sy * tex->pitch + sx];
             if(cmd->options & SPRITE_SHADOW) {
                 int coverage = 0;
@@ -814,6 +854,11 @@ static void cpu_draw(gu_context *ctx, const draw_command *cmd) {
     }
 }
 
+static void cpu_draw(gu_context *ctx, const draw_command *cmd) {
+    const omf_rect full = {0, 0, GAME_W, GAME_H};
+    cpu_draw_clipped(ctx, cmd, &full);
+}
+
 static int cpu_resolve(const gu_context *ctx, const indexed_pixel *p) {
     int index = p->index + p->add;
     if(ctx->framebuffer_options & FBUFOPT_CREDITS) return iclamp(index);
@@ -838,6 +883,157 @@ static bool cpu_replay(gu_context *ctx) {
     for(unsigned i = 0; i < ctx->command_count; i++) cpu_draw(ctx, &ctx->commands[i]);
     return true;
 }
+
+#ifdef PSP_GU_APPROX_EFFECTS
+// The logo underneath the intro lightning is mostly unchanged. Cache all
+// draws preceding its first destination-index effect, and only replay the
+// changing suffix in the affected tiles. Match every field, not a hash: an
+// accidental collision would incorrectly reuse indexed destination pixels.
+static bool same_prefix_command(const draw_command *a, const draw_command *b) {
+    return a->texture == b->texture && a->transparent == b->transparent &&
+           a->dst.x == b->dst.x && a->dst.y == b->dst.y &&
+           a->dst.w == b->dst.w && a->dst.h == b->dst.h &&
+           a->remap_offset == b->remap_offset && a->remap_rounds == b->remap_rounds &&
+           a->palette_offset == b->palette_offset && a->palette_limit == b->palette_limit &&
+           a->opacity == b->opacity && a->flip == b->flip && a->options == b->options;
+}
+
+static bool cpu_prepare_exact_prefix(gu_context *ctx) {
+    unsigned prefix = 0;
+    while(prefix < ctx->command_count &&
+          !ctx->commands[prefix].remap_rounds &&
+          !(ctx->commands[prefix].options & (SPRITE_SHADOW | SPRITE_DARK_TINT | SPRITE_INDEX_ADD))) {
+        ++prefix;
+    }
+    if(prefix == 0 || prefix > PSP_EXACT_PREFIX_MAX_COMMANDS) {
+        ctx->cpu_prefix_valid = false;
+        return false;
+    }
+    bool hit = ctx->cpu_prefix_valid && ctx->cpu_prefix_count == prefix;
+    for(unsigned i = 0; hit && i < prefix; ++i) {
+        hit = same_prefix_command(&ctx->cpu_prefix_commands[i], &ctx->commands[i]) &&
+              ctx->cpu_prefix_guids[i] == ctx->textures[ctx->commands[i].texture].guid;
+    }
+    if(hit) {
+#ifdef PSP_GU_PROFILE
+        ++ctx->cpu_prefix_hits;
+#endif
+        return true;
+    }
+    if(!ctx->cpu_prefix_frame)
+        ctx->cpu_prefix_frame = calloc(GAME_W * GAME_H, sizeof(indexed_pixel));
+    if(!ctx->cpu_prefix_frame) return false;
+
+    indexed_pixel *saved_frame = ctx->cpu_frame;
+    ctx->cpu_frame = ctx->cpu_prefix_frame;
+    memset(ctx->cpu_prefix_frame, 0, GAME_W * GAME_H * sizeof(indexed_pixel));
+    const omf_rect full = {0, 0, GAME_W, GAME_H};
+    for(unsigned i = 0; i < prefix; ++i)
+        cpu_draw_clipped(ctx, &ctx->commands[i], &full);
+    ctx->cpu_frame = saved_frame;
+    for(unsigned i = 0; i < prefix; ++i) {
+        ctx->cpu_prefix_commands[i] = ctx->commands[i];
+        ctx->cpu_prefix_guids[i] = ctx->textures[ctx->commands[i].texture].guid;
+    }
+    ctx->cpu_prefix_count = prefix;
+    ctx->cpu_prefix_valid = true;
+#ifdef PSP_GU_PROFILE
+    ++ctx->cpu_prefix_builds;
+#endif
+    return true;
+}
+
+// Only reconstruct the damaged rectangle. A full indexed replay remains the
+// fallback for large effects, screenshots, and genuinely unsupported draws.
+// Replay *all* commands in submission order: a foreground sprite can cover
+// an earlier destination-index effect, and its final pixels must win.
+static bool cpu_replay_region(gu_context *ctx, const omf_rect *region) {
+    if(!ctx->cpu_frame) ctx->cpu_frame = calloc(GAME_W * GAME_H, sizeof(indexed_pixel));
+    if(!ctx->cpu_frame) return false;
+    for(int y = region->y; y < region->y + region->h; ++y) {
+        indexed_pixel *dst = ctx->cpu_frame + y * GAME_W + region->x;
+        if(ctx->cpu_prefix_valid)
+            memcpy(dst, ctx->cpu_prefix_frame + y * GAME_W + region->x,
+                   (size_t)region->w * sizeof(indexed_pixel));
+        else
+            memset(dst, 0, (size_t)region->w * sizeof(indexed_pixel));
+    }
+    for(unsigned i = ctx->cpu_prefix_valid ? ctx->cpu_prefix_count : 0;
+        i < ctx->command_count; ++i)
+        cpu_draw_clipped(ctx, &ctx->commands[i], region);
+    return true;
+}
+
+static omf_rect exact_tile_bounds(int col, int row) {
+    const int x = col * PSP_EXACT_TILE_SIZE;
+    const int y = row * PSP_EXACT_TILE_SIZE;
+    return (omf_rect){x, y, imin(PSP_EXACT_TILE_SIZE, GAME_W - x),
+                              imin(PSP_EXACT_TILE_SIZE, GAME_H - y)};
+}
+
+// A lightning or shadow image can be mostly transparent. Correct only the
+// 16x16 tiles with an actual effect sample rather than its entire bounding
+// box. Tiles are disjoint, so their final indexed results can be overlaid in
+// one GU draw without altering draw order elsewhere on the screen.
+static unsigned exact_effect_tiles(const gu_context *ctx, uint8_t marked[PSP_EXACT_TILE_COUNT]) {
+    memset(marked, 0, PSP_EXACT_TILE_COUNT);
+    // Only the electrical reveal currently has a validated exact path.
+    // Ordinary combat remaps are frequent and too expensive to replay on
+    // the EE-like PSP CPU; retain their fast GU approximation for now.
+    if(!(ctx->framebuffer_options & FBUFOPT_BRIGHT_DESTINATION_REMAP)) return 0;
+    unsigned count = 0;
+    for(unsigned i = 0; i < ctx->command_count; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        // Shadows and dark tint appear on most combat frames: reconstructing
+        // them tile by tile is substantially slower than the fast GU mask.
+        // Target destination-index remaps first (notably intro lightning).
+        if(cmd->remap_rounds <= 0) continue;
+        const gu_texture *tex = &ctx->textures[cmd->texture];
+        const omf_rect *r = &cmd->dst;
+        if(r->w <= 0 || r->h <= 0) continue;
+        const int x0 = imax(0, cmd->dst.x), y0 = imax(0, cmd->dst.y);
+        const int x1 = imin(GAME_W, cmd->dst.x + cmd->dst.w);
+        const int y1 = imin(GAME_H, cmd->dst.y + cmd->dst.h);
+        if(x0 >= x1 || y0 >= y1) continue;
+        for(int ty = y0 / PSP_EXACT_TILE_SIZE; ty <= (y1 - 1) / PSP_EXACT_TILE_SIZE; ++ty) {
+            for(int tx = x0 / PSP_EXACT_TILE_SIZE; tx <= (x1 - 1) / PSP_EXACT_TILE_SIZE; ++tx) {
+                const int tile = ty * PSP_EXACT_TILE_COLS + tx;
+                if(marked[tile]) continue;
+                const omf_rect bounds = exact_tile_bounds(tx, ty);
+                const int sx0 = imax(x0, bounds.x), sx1 = imin(x1, bounds.x + bounds.w);
+                const int sy0 = imax(y0, bounds.y), sy1 = imin(y1, bounds.y + bounds.h);
+                bool covered = false;
+                for(int y = sy0; y < sy1 && !covered; ++y) {
+                    int sy = (y - r->y) * tex->h / r->h;
+                    if(cmd->flip & FLIP_VERTICAL) sy = tex->h - 1 - sy;
+                    for(int x = sx0; x < sx1; ++x) {
+                        int sx = (x - r->x) * tex->w / r->w;
+                        if(cmd->flip & FLIP_HORIZONTAL) sx = tex->w - 1 - sx;
+                        if(cmd->options & SPRITE_SHADOW) {
+                            for(int k = -1; k <= 2; ++k) {
+                                const int yy = sy + k;
+                                if(yy >= 0 && yy < tex->h &&
+                                   tex->data[yy * tex->pitch + sx] != cmd->transparent) {
+                                    covered = true;
+                                    break;
+                                }
+                            }
+                        } else {
+                            covered = tex->data[sy * tex->pitch + sx] != cmd->transparent;
+                        }
+                        if(covered) break;
+                    }
+                }
+                if(covered) {
+                    marked[tile] = 1;
+                    if(++count > PSP_EXACT_TILE_LIMIT) return count;
+                }
+            }
+        }
+    }
+    return count;
+}
+#endif
 
 static void capture_cpu(gu_context *ctx) {
     if(!ctx->screenshot) return;
@@ -879,6 +1075,75 @@ static void gpu_draw_cpu_frame(gu_context *ctx, const omf_rect *vp) {
     sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 2, 0, v);
 }
 
+#ifdef PSP_GU_APPROX_EFFECTS
+// Convert disjoint affected tiles before GU starts consuming the texture.
+// A single 512x256 scratch texture holds their absolute logical coordinates.
+static bool cpu_prepare_exact_tiles(gu_context *ctx, const uint8_t marked[PSP_EXACT_TILE_COUNT]) {
+    if(!ctx->rgba_frame) ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
+    if(!ctx->rgba_frame) return false;
+#ifdef PSP_GU_PROFILE
+    uint64_t stage_start = sceKernelGetSystemTimeWide();
+#endif
+    cpu_prepare_exact_prefix(ctx);
+#ifdef PSP_GU_PROFILE
+    ctx->exact_prefix_us += sceKernelGetSystemTimeWide() - stage_start;
+#endif
+    for(int tile = 0; tile < PSP_EXACT_TILE_COUNT; ++tile) {
+        if(!marked[tile]) continue;
+        const omf_rect r = exact_tile_bounds(tile % PSP_EXACT_TILE_COLS, tile / PSP_EXACT_TILE_COLS);
+#ifdef PSP_GU_PROFILE
+        stage_start = sceKernelGetSystemTimeWide();
+#endif
+        if(!cpu_replay_region(ctx, &r)) return false;
+#ifdef PSP_GU_PROFILE
+        ctx->exact_replay_us += sceKernelGetSystemTimeWide() - stage_start;
+        stage_start = sceKernelGetSystemTimeWide();
+#endif
+        for(int y = r.y; y < r.y + r.h; ++y) {
+            for(int x = r.x; x < r.x + r.w; ++x) {
+                const int index = cpu_resolve(ctx, &ctx->cpu_frame[y * GAME_W + x]);
+                const vga_color c = ctx->palette.colors[index];
+                ctx->rgba_frame[y * 512 + x] = 0xff000000u |
+                    ((uint32_t)c.b << 16) | ((uint32_t)c.g << 8) | c.r;
+            }
+        }
+#ifdef PSP_GU_PROFILE
+        ctx->exact_convert_us += sceKernelGetSystemTimeWide() - stage_start;
+#endif
+    }
+    // One coherent writeback is cheaper than hundreds of 16-pixel row flushes
+    // on physical PSP. Only corrected tiles are sampled by the following GU
+    // draw, so untouched scratch-buffer pixels are irrelevant.
+    sceKernelDcacheWritebackRange(ctx->rgba_frame, 512 * 256 * sizeof(uint32_t));
+    return true;
+}
+
+// Overlay final RGBA colors after the indexed GU sprite stream. Non-effect
+// tiles are untouched, and all corrected tiles share a single GE draw call.
+static void gpu_draw_exact_tiles(gu_context *ctx, const omf_rect *vp,
+                                 const uint8_t marked[PSP_EXACT_TILE_COUNT], unsigned count) {
+    sceGuTexMode(GU_PSM_8888, 0, 0, GU_FALSE);
+    sceGuTexImage(0, 512, 256, 512, ctx->rgba_frame);
+    sceGuTexFunc(GU_TFX_REPLACE, GU_TCC_RGBA);
+    sceGuColor(0xffffffff);
+    gu_sprite_vertex *v = sceGuGetMemory(sizeof(*v) * 2 * count);
+    unsigned i = 0;
+    for(int tile = 0; tile < PSP_EXACT_TILE_COUNT; ++tile) {
+        if(!marked[tile]) continue;
+        const omf_rect r = exact_tile_bounds(tile % PSP_EXACT_TILE_COLS, tile / PSP_EXACT_TILE_COLS);
+        const float x0 = vp->x + (float)r.x * vp->w / GAME_W;
+        const float y0 = vp->y + (float)r.y * vp->h / GAME_H;
+        const float x1 = vp->x + (float)(r.x + r.w) * vp->w / GAME_W;
+        const float y1 = vp->y + (float)(r.y + r.h) * vp->h / GAME_H;
+        v[i++] = (gu_sprite_vertex){.u=r.x, .v=r.y, .x=x0, .y=y0, .z=0};
+        v[i++] = (gu_sprite_vertex){.u=r.x + r.w, .v=r.y + r.h,
+                                    .x=x1, .y=y1, .z=0};
+    }
+    sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                   count * 2, 0, v);
+}
+#endif
+
 static void finish(void *userdata) {
     gu_context *ctx = userdata;
 #ifdef PSP_GU_PROFILE
@@ -886,6 +1151,36 @@ static void finish(void *userdata) {
     const uint64_t gu_start_us = sceKernelGetSystemTimeWide();
 #endif
     flush_palette(ctx);
+#ifdef PSP_GU_APPROX_EFFECTS
+    uint8_t exact_tiles[PSP_EXACT_TILE_COUNT];
+    bool exact_tiles_ready = false;
+#ifdef PSP_GU_PROFILE
+    const uint64_t scan_start = sceKernelGetSystemTimeWide();
+#endif
+    const unsigned exact_tile_count = ctx->needs_cpu ? 0 : exact_effect_tiles(ctx, exact_tiles);
+#ifdef PSP_GU_PROFILE
+    ctx->exact_tile_scan_us += sceKernelGetSystemTimeWide() - scan_start;
+#endif
+    if(exact_tile_count) {
+        if(exact_tile_count <= PSP_EXACT_TILE_LIMIT) {
+#ifdef PSP_GU_PROFILE
+            const uint64_t exact_start = sceKernelGetSystemTimeWide();
+#endif
+            exact_tiles_ready = cpu_prepare_exact_tiles(ctx, exact_tiles);
+#ifdef PSP_GU_PROFILE
+            if(exact_tiles_ready) {
+                ++ctx->exact_effect_frames;
+                ctx->exact_effect_pixels += exact_tile_count * PSP_EXACT_TILE_SIZE * PSP_EXACT_TILE_SIZE;
+                ctx->exact_effect_cpu_us += sceKernelGetSystemTimeWide() - exact_start;
+            }
+#endif
+        } else {
+#ifdef PSP_GU_PROFILE
+            ++ctx->skipped_effect_frames;
+#endif
+        }
+    }
+#endif
     // CLUT variants cannot represent destination-index remap. Replay precisely
     // through the indexed CPU buffer for such frames, not a lossy RGB overlay.
     if(!ctx->needs_cpu) {
@@ -967,6 +1262,9 @@ static void finish(void *userdata) {
             }
             gpu_draw(ctx, cmd, &vp, change, bind_texture);
         }
+#ifdef PSP_GU_APPROX_EFFECTS
+        if(exact_tiles_ready) gpu_draw_exact_tiles(ctx, &vp, exact_tiles, exact_tile_count);
+#endif
     }
     sceGuFinish();
 #ifdef PSP_GU_PROFILE
@@ -1024,6 +1322,22 @@ static void finish(void *userdata) {
                  ctx->profile_sprite_draws, ctx->profile_large_draws,
                  ctx->profile_background_draws, ctx->profile_texture_binds,
                  ctx->profile_texel_references, ctx->profile_texture_misses);
+#ifdef PSP_GU_APPROX_EFFECTS
+        log_info("PSP GU exact effects (600 frames): exact=%lu pixels=%lu skipped=%lu replay-us=%llu",
+                 ctx->exact_effect_frames, ctx->exact_effect_pixels, ctx->skipped_effect_frames,
+                 (unsigned long long)ctx->exact_effect_cpu_us);
+        ctx->exact_effect_frames = ctx->exact_effect_pixels = ctx->skipped_effect_frames = 0;
+        ctx->exact_effect_cpu_us = 0;
+        log_info("PSP GU indexed prefix (600 frames): hits=%lu builds=%lu",
+                 ctx->cpu_prefix_hits, ctx->cpu_prefix_builds);
+        log_info("PSP GU exact stage (600 frames): scan=%lluus prefix=%lluus replay=%lluus convert=%lluus",
+                 (unsigned long long)ctx->exact_tile_scan_us,
+                 (unsigned long long)ctx->exact_prefix_us,
+                 (unsigned long long)ctx->exact_replay_us,
+                 (unsigned long long)ctx->exact_convert_us);
+        ctx->cpu_prefix_hits = ctx->cpu_prefix_builds = 0;
+        ctx->exact_tile_scan_us = ctx->exact_prefix_us = ctx->exact_replay_us = ctx->exact_convert_us = 0;
+#endif
         ctx->clut_reused = ctx->clut_built = ctx->clut_invalidated = 0;
         ctx->shadow_masks_evicted = ctx->shadow_textures_evicted = 0;
         ctx->profile_prepare_us = ctx->profile_commands_us = 0;
@@ -1072,6 +1386,7 @@ static void scene_change(void *userdata) {
     clear_textures(ctx);
     ctx->clut_count = 0;
     memset(ctx->clut_hints, 0, sizeof(ctx->clut_hints));
+    ctx->cpu_prefix_valid = false;
 }
 static void draw_atlas(void *userdata, bool enabled) {
     (void)userdata; (void)enabled;
