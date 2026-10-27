@@ -160,7 +160,9 @@ target_link_libraries(openomf_psp PRIVATE
     pspdebug
     m z
 )
-create_pbp_file(TARGET openomf_psp TITLE "OpenOMF PSP" MEMSIZE 1)
+create_pbp_file(TARGET openomf_psp TITLE "OpenOMF PSP"
+    ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon0.png"
+    MEMSIZE 1)
 
 add_custom_command(TARGET openomf_psp POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/resources"

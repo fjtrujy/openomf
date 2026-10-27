@@ -26,6 +26,11 @@ this **whole directory** to `ms0:/PSP/GAME/OpenOMF/` on the memory stick:
 the EBOOT is not standalone. All files in `resources/` must remain beside it.
 `save/` holds logs, settings and saved progress.
 
+The EBOOT uses `ports/psp/assets/icon0.png` (144x82), derived from the
+One Must Fall 2097 logo, as its PSP XMB menu artwork. The `PSP` GitHub Actions
+workflow also publishes `openomf-psp.zip`, containing the same ready-to-copy
+`PSP/GAME/OpenOMF/` directory for physical hardware.
+
 ### SDL2-free PSP executable
 
 `PSP_STANDALONE=ON` (default) compiles a PSP module entry point and
