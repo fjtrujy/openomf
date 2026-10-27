@@ -17,10 +17,6 @@ jobs:
       - name: Install host build tools
         run: |
           apk add --no-cache build-base cmake ninja curl unzip zip
-      - name: Install PSP libraries
-        run: |
-          psp-pacman -Sy --noconfirm
-          psp-pacman -S --needed --noconfirm psp-libpng psp-libxmp psp-libmodplug psp-libvorbis psp-enet
       - name: Build EBOOT
         run: |
           psp-cmake -S ports/psp -B build/psp -G Ninja -DCMAKE_BUILD_TYPE=Release
