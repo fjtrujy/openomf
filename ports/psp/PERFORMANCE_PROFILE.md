@@ -140,6 +140,9 @@ PSPLink profiling subsequently measured approximately **10.6 ms/frame** in
 preparation/command submission. See
 [GU_PERSISTENT_CLUT_PROFILE.md](GU_PERSISTENT_CLUT_PROFILE.md) for real
 hardware timings and the latest palette-cache results.
+See also [ADVANCED_BLIT_BENCHMARK.md](ADVANCED_BLIT_BENCHMARK.md):
+splitting large sprite quads into texture-cache-friendly strips subsequently
+reduced the actual 222 MHz `sceGuSync` wait to around 2.9 ms.
 
 - `build/psp-frame-profile-333/evidence/game.log`
 - `build/psp-frame-profile-222/evidence/game.log`

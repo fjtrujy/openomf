@@ -114,6 +114,11 @@ only shipping framebuffer format.
 
 ## Remaining optimization opportunity
 
+**Follow-up completed:** A later benchmark verified PSPSDK-style advanced
+sprite blitting on physical PSP. Narrow 32-texel strips on large textures
+reduced the 222 MHz GU synchronization interval to ~2.9 ms, from the ~10.6 ms
+reported here. See [ADVANCED_BLIT_BENCHMARK.md](ADVANCED_BLIT_BENCHMARK.md).
+
 For further gains toward 60 FPS at 222 MHz, profile the **PSP GU command
 stream and fragment work**, not just CPU palette loops. Candidate steps:
 count redundant CLUT loads and texture-state changes, measure contiguous

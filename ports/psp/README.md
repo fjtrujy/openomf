@@ -154,8 +154,14 @@ averaged near 58 FPS; PPSSPP alone did not predict this hardware difference.
 Further cross-frame CLUT caching, shadow-mask memory reclamation and actual
 physical GU execution timings are in
 [GU_PERSISTENT_CLUT_PROFILE.md](GU_PERSISTENT_CLUT_PROFILE.md). The frame
-completion wait, rather than CPU palette generation, remains the major
-hardware constraint at 222 MHz.
+completion wait was identified as the major hardware constraint at 222 MHz.
+**Update:** [ADVANCED_BLIT_BENCHMARK.md](ADVANCED_BLIT_BENCHMARK.md)
+documents a subsequent real-PSP fix: splitting large T8 sprites/backgrounds
+into 32-texel strips dramatically improves texture-cache locality, reducing
+the 222 MHz GU completion wait from ~10.5 ms to ~2.9 ms. This path is always
+enabled in the PSP GU renderer **for textures at least 128×64 pixels**;
+smaller textures use a single quad. There is no CMake option for this.
+The 333 MHz clock remains the shipping default.
 
 ## Rendering architecture
 

@@ -50,6 +50,13 @@
 #define CLUT_HINTS 128
 #define MAGIC_REMAP_ROUNDS 12
 
+// PSP SDK's advancedSpriteBlit technique: split large textured quads into
+// narrow strips so the GE texture cache can reuse adjacent texels efficiently.
+// Only large textures benefit: small sprites keep the single-quad path.
+#define PSP_GU_BLIT_SLICE 32
+#define PSP_GU_BLIT_MIN_WIDTH 128
+#define PSP_GU_BLIT_MIN_HEIGHT 64
+
 #if VGA_PALETTE_SIZE != 256
 #error "PSP GU T8 textures require OpenOMF's 256-color palette build"
 #endif
@@ -120,6 +127,8 @@ typedef struct {
     unsigned long clut_reused, clut_built, clut_invalidated;
     unsigned long shadow_masks_evicted, shadow_textures_evicted;
     uint64_t profile_prepare_us, profile_commands_us, profile_sync_us, profile_vblank_us;
+    unsigned long profile_sprite_draws, profile_large_draws, profile_background_draws;
+    unsigned long profile_texture_binds, profile_texel_references, profile_texture_misses;
 #endif
     indexed_pixel *cpu_frame;
     uint32_t *rgba_frame;
@@ -346,6 +355,9 @@ static gu_texture *get_texture(gu_context *ctx, const surface *src) {
     int width = gpu_compatible ? next_pow2(src->w) : src->w;
     int height = gpu_compatible ? next_pow2(src->h) : src->h;
     size_t bytes = (size_t)width * height;
+#ifdef PSP_GU_PROFILE
+    ++ctx->profile_texture_misses;
+#endif
     if(bytes > MAX_TEXTURE_BYTES) return NULL;
     int slot = -1;
     while(ctx->texture_bytes + bytes > MAX_TEXTURE_BYTES || slot < 0) {
@@ -687,6 +699,14 @@ static void sprite_vertices(gu_sprite_vertex *v, const omf_rect *screen, int tw,
 static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *vp,
                      bool load_clut, bool bind_texture) {
     gu_texture *tex = &ctx->textures[cmd->texture];
+#ifdef PSP_GU_PROFILE
+    ++ctx->profile_sprite_draws;
+    if(tex->w >= 128 && tex->h >= 64) ++ctx->profile_large_draws;
+    if(cmd->dst.w >= GAME_W / 2 && cmd->dst.h >= GAME_H / 2)
+        ++ctx->profile_background_draws;
+    ctx->profile_texel_references += (unsigned long)tex->w * (unsigned long)tex->h;
+    if(bind_texture) ++ctx->profile_texture_binds;
+#endif
     if(load_clut) {
         sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
         sceGuClutLoad(32, ctx->clut_storage[cmd->clut]);
@@ -711,6 +731,26 @@ static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *v
         (cmd->dst.w * vp->w + GAME_W / 2) / GAME_W,
         (cmd->dst.h * vp->h + GAME_H / 2) / GAME_H
     };
+    if(tex->w >= PSP_GU_BLIT_MIN_WIDTH && tex->h >= PSP_GU_BLIT_MIN_HEIGHT && dst.w > 0) {
+        const unsigned strips = (unsigned)(tex->w + PSP_GU_BLIT_SLICE - 1) / PSP_GU_BLIT_SLICE;
+        gu_sprite_vertex *v = sceGuGetMemory(sizeof(gu_sprite_vertex) * 2 * strips);
+        for(unsigned i = 0; i < strips; ++i) {
+            const int left = (int)i * PSP_GU_BLIT_SLICE;
+            const int right = imin(left + PSP_GU_BLIT_SLICE, tex->w);
+            const float x0 = dst.x + (float)left * dst.w / tex->w;
+            const float x1 = dst.x + (float)right * dst.w / tex->w;
+            const float u0 = (cmd->flip & FLIP_HORIZONTAL) ? tex->w - left : left;
+            const float u1 = (cmd->flip & FLIP_HORIZONTAL) ? tex->w - right : right;
+            const float v0 = (cmd->flip & FLIP_VERTICAL) ? tex->h : 0;
+            const float v1 = (cmd->flip & FLIP_VERTICAL) ? 0 : tex->h;
+            v[i * 2] = (gu_sprite_vertex){.u=u0, .v=v0, .x=x0, .y=dst.y, .z=0};
+            v[i * 2 + 1] = (gu_sprite_vertex){.u=u1, .v=v1,
+                                             .x=x1, .y=dst.y + dst.h, .z=0};
+        }
+        sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                       strips * 2, 0, v);
+        return;
+    }
     gu_sprite_vertex *v = sceGuGetMemory(sizeof(gu_sprite_vertex) * 2);
     sprite_vertices(v, &dst, tex->w, tex->h, cmd->flip);
     sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 2, 0, v);
@@ -910,7 +950,7 @@ static void finish(void *userdata) {
         int last_clut = -1;
         int last_texture = -1;
         bool last_shadow = false;
-        sceGuTexMode(GU_PSM_T8, 0, 0, 0);
+        sceGuTexMode(GU_PSM_T8, 0, 0, GU_FALSE);
         sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
         for(unsigned i = 0; i < ctx->command_count; i++) {
             const draw_command *cmd = &ctx->commands[i];
@@ -980,10 +1020,16 @@ static void finish(void *userdata) {
                  (unsigned long long)(ctx->profile_commands_us / 600),
                  (unsigned long long)(ctx->profile_sync_us / 600),
                  (unsigned long long)(ctx->profile_vblank_us / 600));
+        log_info("PSP GU textures (600 frames): draws=%lu large=%lu background=%lu binds=%lu texel-refs=%lu new-textures=%lu",
+                 ctx->profile_sprite_draws, ctx->profile_large_draws,
+                 ctx->profile_background_draws, ctx->profile_texture_binds,
+                 ctx->profile_texel_references, ctx->profile_texture_misses);
         ctx->clut_reused = ctx->clut_built = ctx->clut_invalidated = 0;
         ctx->shadow_masks_evicted = ctx->shadow_textures_evicted = 0;
         ctx->profile_prepare_us = ctx->profile_commands_us = 0;
         ctx->profile_sync_us = ctx->profile_vblank_us = 0;
+        ctx->profile_sprite_draws = ctx->profile_large_draws = ctx->profile_background_draws = 0;
+        ctx->profile_texture_binds = ctx->profile_texel_references = ctx->profile_texture_misses = 0;
     }
 #endif
 }
