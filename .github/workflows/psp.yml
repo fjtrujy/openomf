@@ -1,0 +1,40 @@
+name: PSP
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [master, new_psp]
+
+jobs:
+  psp:
+    name: Build PSP EBOOT
+    runs-on: ubuntu-24.04
+    container:
+      image: pspdev/pspdev:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends cmake ninja-build curl unzip zip
+      - name: Install PSP libraries
+        run: |
+          psp-pacman -Syu --noconfirm
+          psp-pacman -S --needed --noconfirm psp-libpng psp-libxmp psp-libmodplug psp-libvorbis psp-enet
+      - name: Build EBOOT
+        run: |
+          psp-cmake -S ports/psp -B build/psp -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/psp --parallel "$(nproc)"
+          test -s build/psp/EBOOT.PBP
+      - name: Package PSP game
+        run: |
+          sh ports/psp/package.sh build/psp
+          test -s build/psp/PSP/GAME/OpenOMF/EBOOT.PBP
+          cd build/psp
+          zip -qr openomf-psp.zip PSP
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openomf-psp
+          path: build/psp/openomf-psp.zip
+          if-no-files-found: error
