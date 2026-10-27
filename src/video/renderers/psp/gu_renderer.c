@@ -499,12 +499,17 @@ static int get_clut(gu_context *ctx, const draw_command *cmd) {
     return slot;
 }
 
-static omf_rect viewport(const gu_context *ctx) {
+static omf_rect viewport_bounds(const gu_context *ctx) {
     omf_rect r = {0, 0, SCREEN_W, SCREEN_H};
     if(ctx->aspect == 0) {
         r.w = SCREEN_H * 4 / 3;
         r.x = (SCREEN_W - r.w) / 2;
     }
+    return r;
+}
+
+static omf_rect viewport(const gu_context *ctx) {
+    omf_rect r = viewport_bounds(ctx);
     r.x += ctx->target_x * r.w / GAME_W;
     r.y += ctx->target_y * r.w / GAME_W;
     return r;
@@ -714,8 +719,16 @@ static void finish(void *userdata) {
     if(ctx->screenshot && ctx->needs_cpu) capture_cpu(ctx);
     omf_rect vp = viewport(ctx);
     sceGuStart(GU_DIRECT, ctx->display_list);
+    // A prior frame may have clipped to 4:3. Clear the entire display first
+    // so the side borders stay black even during camera shake or mode changes.
+    sceGuScissor(0, 0, SCREEN_W, SCREEN_H);
     sceGuClearColor(0xff000000);
     sceGuClear(GU_COLOR_BUFFER_BIT);
+    // GU sprite coordinates can extend beyond the 320x200 logical game area.
+    // Clip to the unshifted 4:3 viewport instead of leaking into pillarboxes.
+    // The NATIVE aspect option intentionally uses the whole PSP screen.
+    const omf_rect clip = viewport_bounds(ctx);
+    sceGuScissor(clip.x, clip.y, clip.w, clip.h);
     if(ctx->needs_cpu) {
         ctx->cpu_frames++;
         if(ctx->frame_effects & 1) ctx->remap_frames++;

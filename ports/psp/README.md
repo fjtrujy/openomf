@@ -172,6 +172,16 @@ That variant replays destination-index effects in a CPU framebuffer and is
 available as a fallback; the normal menu/game path defaults to `PSP GU`.
 The 320x200 game is scaled into the 480x272 PSP screen.
 
+The original game uses a **4:3 display aspect** despite its 320x200 VGA pixel
+grid. The default video-menu `ASPECT: 4:3` mode uses a centered 362x272
+viewport on the PSP, with 59-pixel black borders on each side. GU sprites and
+effects are clipped to these boundaries so even fighters, projectiles and
+camera shakes cannot draw into the pillarboxes. The menu's `ASPECT: NATIVE`
+setting deliberately stretches the same game to the whole 480x272 display;
+the full screen remains drawable in that mode. Scissoring is reset to the
+whole display before clearing each frame, then applied to the unshifted
+logical viewport, preventing stale borders when the aspect mode changes.
+
 ### Native PSP display lifecycle
 
 `PSP_NATIVE_DISPLAY=ON` (default) calls `sceDisplaySetMode()` before
