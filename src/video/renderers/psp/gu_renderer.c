@@ -42,9 +42,12 @@
 #define GU_LIST_WORDS 262144
 #define MAX_TEXTURES 256
 #define TEXTURE_HINTS 512
+#ifndef MAX_TEXTURE_BYTES
 #define MAX_TEXTURE_BYTES (4u * 1024u * 1024u)
+#endif
 #define MAX_COMMANDS 4096
 #define MAX_CLUTS 64
+#define CLUT_HINTS 128
 #define MAGIC_REMAP_ROUNDS 12
 
 #if VGA_PALETTE_SIZE != 256
@@ -75,6 +78,7 @@ typedef struct {
     int transparent, remap_offset, remap_rounds, palette_offset, palette_limit;
     unsigned options;
     uint32_t *colors;
+    unsigned long last_used_frame;
 } clut_variant;
 
 typedef struct {
@@ -109,7 +113,14 @@ typedef struct {
     _Alignas(16) uint32_t display_list[GU_LIST_WORDS];
     _Alignas(16) uint32_t clut_storage[MAX_CLUTS][VGA_PALETTE_SIZE];
     clut_variant cluts[MAX_CLUTS];
+    uint8_t clut_hints[CLUT_HINTS]; /* Slot + 1; zero denotes no hint. */
     unsigned clut_count;
+    unsigned cached_clut_options;
+#ifdef PSP_GU_PROFILE
+    unsigned long clut_reused, clut_built, clut_invalidated;
+    unsigned long shadow_masks_evicted, shadow_textures_evicted;
+    uint64_t profile_prepare_us, profile_commands_us, profile_sync_us, profile_vblank_us;
+#endif
     indexed_pixel *cpu_frame;
     uint32_t *rgba_frame;
     omf_rect offscreen_area;
@@ -173,13 +184,26 @@ static void destroy(renderer *r) {
 static void flush_palette(gu_context *ctx) {
     vga_palette *palette;
     vga_remap_tables *remaps;
+    bool changed = false;
     if(vga_state_is_palette_dirty(&palette, NULL, NULL)) {
         memcpy(&ctx->palette, palette, sizeof(ctx->palette));
         vga_state_mark_palette_flushed();
+        changed = true;
     }
     if(vga_state_is_remap_dirty(&remaps)) {
         memcpy(&ctx->remaps, remaps, sizeof(ctx->remaps));
         vga_state_mark_remaps_flushed();
+        changed = true;
+    }
+    // A CLUT contains final RGB values, not indices. A palette/remap change
+    // invalidates all previously derived colors, even for identical commands.
+    if(changed || ctx->cached_clut_options != ctx->framebuffer_options) {
+        ctx->clut_count = 0;
+        memset(ctx->clut_hints, 0, sizeof(ctx->clut_hints));
+        ctx->cached_clut_options = ctx->framebuffer_options;
+#ifdef PSP_GU_PROFILE
+        ++ctx->clut_invalidated;
+#endif
     }
 }
 
@@ -377,7 +401,6 @@ static gu_texture *get_texture(gu_context *ctx, const surface *src) {
 static void prepare(void *userdata, unsigned framebuffer_options) {
     gu_context *ctx = userdata;
     ctx->command_count = 0;
-    ctx->clut_count = 0;
     ctx->frame_no++;
     ctx->frame_effects = 0;
     ctx->offscreen = false;
@@ -429,7 +452,53 @@ static bool ensure_shadow_mask(gu_context *ctx, gu_texture *tex, int transparent
     // Precompute the coverage used by OpenOMF's four-tap shadow shader ONCE
     // rather than evaluating its mask at every destination pixel every frame.
     const size_t bytes = (size_t)tex->pitch * tex->tex_h;
-    if(ctx->texture_bytes + bytes > MAX_TEXTURE_BYTES) return false;
+    // Shadow masks are disposable derived data. Prefer evicting an unused
+    // cached mask rather than forcing a full CPU-rendered frame when the
+    // texture budget fills during a long fight. Never evict data referenced
+    // by a draw command from the current frame.
+    while(ctx->texture_bytes + bytes > MAX_TEXTURE_BYTES) {
+        int victim = -1;
+        unsigned long oldest = ~0ul;
+        for(int i = 0; i < MAX_TEXTURES; i++) {
+            const gu_texture *candidate = &ctx->textures[i];
+            if(candidate->shadow_mask && candidate->used_frame != ctx->frame_no &&
+               candidate->recent < oldest) {
+                victim = i;
+                oldest = candidate->recent;
+            }
+        }
+        if(victim < 0) {
+            // A scene can fill the budget with sprites that have no shadow
+            // masks. Discard an entirely unused texture before giving up.
+            for(int i = 0; i < MAX_TEXTURES; i++) {
+                const gu_texture *candidate = &ctx->textures[i];
+                if(candidate->data && candidate->used_frame != ctx->frame_no &&
+                   candidate->recent < oldest) {
+                    victim = i;
+                    oldest = candidate->recent;
+                }
+            }
+            if(victim < 0) return false;
+            gu_texture *discard = &ctx->textures[victim];
+            ctx->texture_bytes -= discard->bytes;
+            free(discard->data);
+            free(discard->shadow_mask);
+            memset(discard, 0, sizeof(*discard));
+#ifdef PSP_GU_PROFILE
+            ++ctx->shadow_textures_evicted;
+#endif
+            continue;
+        }
+        gu_texture *discard = &ctx->textures[victim];
+        const size_t freed = (size_t)discard->pitch * discard->tex_h;
+        free(discard->shadow_mask);
+        discard->shadow_mask = NULL;
+        discard->bytes -= freed;
+        ctx->texture_bytes -= freed;
+#ifdef PSP_GU_PROFILE
+        ++ctx->shadow_masks_evicted;
+#endif
+    }
     uint8_t *mask = memalign(16, bytes);
     if(!mask) return false;
     memset(mask, 0, bytes);
@@ -468,17 +537,80 @@ static int source_index(const gu_context *ctx, const draw_command *cmd, int idx)
     return iclamp(idx);
 }
 
+static bool clut_matches(const clut_variant *entry, const draw_command *cmd) {
+    return entry->transparent == cmd->transparent &&
+           entry->remap_offset == cmd->remap_offset &&
+           entry->remap_rounds == cmd->remap_rounds &&
+           entry->palette_offset == cmd->palette_offset &&
+           entry->palette_limit == cmd->palette_limit &&
+           entry->options == cmd->options;
+}
+
+static unsigned clut_hint_key(const draw_command *cmd) {
+    uint32_t h = (uint32_t)cmd->transparent * 2654435761u;
+    h ^= (uint32_t)cmd->remap_offset * 2246822519u;
+    h ^= (uint32_t)cmd->remap_rounds * 3266489917u;
+    h ^= (uint32_t)cmd->palette_offset * 668265263u;
+    h ^= (uint32_t)cmd->palette_limit * 374761393u;
+    h ^= cmd->options * 1274126177u;
+    return (h ^ (h >> 16)) & (CLUT_HINTS - 1);
+}
+
 static int get_clut(gu_context *ctx, const draw_command *cmd) {
+    const unsigned hint_key = clut_hint_key(cmd);
+    const unsigned hint_slot = ctx->clut_hints[hint_key];
+    if(hint_slot && hint_slot <= ctx->clut_count) {
+        clut_variant *entry = &ctx->cluts[hint_slot - 1];
+        if(clut_matches(entry, cmd)) {
+            entry->last_used_frame = ctx->frame_no;
+#ifdef PSP_GU_PROFILE
+            ++ctx->clut_reused;
+#endif
+            return (int)(hint_slot - 1);
+        }
+    }
     for(unsigned i = 0; i < ctx->clut_count; i++) {
         clut_variant *entry = &ctx->cluts[i];
-        if(entry->transparent == cmd->transparent && entry->remap_offset == cmd->remap_offset &&
-           entry->remap_rounds == cmd->remap_rounds &&
-           entry->palette_offset == cmd->palette_offset && entry->palette_limit == cmd->palette_limit &&
-           entry->options == cmd->options) return (int)i;
+        if(clut_matches(entry, cmd)) {
+            entry->last_used_frame = ctx->frame_no;
+            ctx->clut_hints[hint_key] = (uint8_t)(i + 1);
+#ifdef PSP_GU_PROFILE
+            ++ctx->clut_reused;
+#endif
+            return (int)i;
+        }
     }
-    if(ctx->clut_count >= MAX_CLUTS) return -1;
-    unsigned slot = ctx->clut_count++;
+    unsigned slot;
+    if(ctx->clut_count < MAX_CLUTS) {
+        slot = ctx->clut_count++;
+    } else {
+        // Palette variants can accumulate across frames. Replace one that is
+        // not referenced by any draw command from THIS frame, since those
+        // draw commands hold direct indices into clut_storage[].
+        unsigned long oldest_frame = ~0ul;
+        int victim = -1;
+        for(unsigned i = 0; i < MAX_CLUTS; i++) {
+            if(ctx->cluts[i].last_used_frame != ctx->frame_no &&
+               ctx->cluts[i].last_used_frame < oldest_frame) {
+                oldest_frame = ctx->cluts[i].last_used_frame;
+                victim = (int)i;
+            }
+        }
+        if(victim < 0) {
+#ifdef PSP_GU_PROFILE
+            log_warn("PSP GU CLUT saturated: frame=%lu draws=%u entries=%u",
+                     ctx->frame_no, ctx->command_count, ctx->clut_count);
+#endif
+            return -1; // Preserve exact CPU fallback on saturation.
+        }
+        slot = (unsigned)victim;
+    }
     clut_variant *v = &ctx->cluts[slot];
+    v->last_used_frame = ctx->frame_no;
+    ctx->clut_hints[hint_key] = (uint8_t)(slot + 1);
+#ifdef PSP_GU_PROFILE
+    ++ctx->clut_built;
+#endif
     v->transparent = cmd->transparent;
     v->remap_offset = cmd->remap_offset;
     v->remap_rounds = cmd->remap_rounds;
@@ -711,6 +843,7 @@ static void finish(void *userdata) {
     gu_context *ctx = userdata;
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_start_ms = omf_time_ms();
+    const uint64_t gu_start_us = sceKernelGetSystemTimeWide();
 #endif
     flush_palette(ctx);
     // CLUT variants cannot represent destination-index remap. Replay precisely
@@ -719,6 +852,10 @@ static void finish(void *userdata) {
         for(unsigned i = 0; i < ctx->command_count; i++) {
             int clut = get_clut(ctx, &ctx->commands[i]);
             if(clut < 0) {
+#ifdef PSP_GU_PROFILE
+                log_warn("PSP GU CPU fallback: CLUT lookup failed frame=%lu draw=%u",
+                         ctx->frame_no, i);
+#endif
                 ctx->needs_cpu = true;
                 break;
             }
@@ -728,6 +865,10 @@ static void finish(void *userdata) {
             if(cmd->options & SPRITE_SHADOW) {
                 gu_texture *tex = &ctx->textures[cmd->texture];
                 if(!ensure_shadow_mask(ctx, tex, cmd->transparent)) {
+#ifdef PSP_GU_PROFILE
+                    log_warn("PSP GU CPU fallback: shadow mask budget frame=%lu draw=%u",
+                             ctx->frame_no, i);
+#endif
                     // Preserve the entire frame rather than silently losing
                     // one shadow if the indexed-texture budget is exhausted.
                     ctx->needs_cpu = true;
@@ -743,6 +884,9 @@ static void finish(void *userdata) {
     }
     if(ctx->screenshot && ctx->needs_cpu) capture_cpu(ctx);
     omf_rect vp = viewport(ctx);
+#ifdef PSP_GU_PROFILE
+    const uint64_t gu_prepared_us = sceKernelGetSystemTimeWide();
+#endif
     sceGuStart(GU_DIRECT, ctx->display_list);
     // A prior frame may have clipped to 4:3. Clear the entire display first
     // so the side borders stay black even during camera shake or mode changes.
@@ -787,10 +931,12 @@ static void finish(void *userdata) {
     sceGuFinish();
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_commands_ms = omf_time_ms();
+    const uint64_t gu_commands_us = sceKernelGetSystemTimeWide();
 #endif
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_sync_ms = omf_time_ms();
+    const uint64_t gu_sync_us = sceKernelGetSystemTimeWide();
 #endif
     // The PSP display refreshes at 60 Hz. Even if desktop settings request
     // VSync OFF, cap native presentation to VBlank: otherwise the engine can
@@ -799,6 +945,11 @@ static void finish(void *userdata) {
     sceGuSwapBuffers();
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_swap_ms = omf_time_ms();
+    const uint64_t gu_swap_us = sceKernelGetSystemTimeWide();
+    ctx->profile_prepare_us += gu_prepared_us - gu_start_us;
+    ctx->profile_commands_us += gu_commands_us - gu_prepared_us;
+    ctx->profile_sync_us += gu_sync_us - gu_commands_us;
+    ctx->profile_vblank_us += gu_swap_us - gu_sync_us;
     if(gu_swap_ms - gu_start_ms > 120) {
         log_warn("PSP GU slow frame: commands=%llums sync=%llums vblank/swap=%llums draws=%u cache=%u KiB CPU=%d",
                  (unsigned long long)(gu_commands_ms - gu_start_ms),
@@ -820,6 +971,19 @@ static void finish(void *userdata) {
                  ctx->gpu_frames, ctx->cpu_frames, ctx->remap_frames, ctx->shadow_frames,
                  ctx->tint_frames, ctx->additive_frames, ctx->command_count,
                  (unsigned)(ctx->texture_bytes / 1024));
+        log_info("PSP GU CLUT cache (600 frames): reused=%lu built=%lu invalidated=%lu",
+                 ctx->clut_reused, ctx->clut_built, ctx->clut_invalidated);
+        log_info("PSP GU shadow budget (600 frames): masks-evicted=%lu textures-evicted=%lu",
+                 ctx->shadow_masks_evicted, ctx->shadow_textures_evicted);
+        log_info("PSP GU timings (600 frames): prep=%lluus commands=%lluus sync=%lluus vblank=%lluus",
+                 (unsigned long long)(ctx->profile_prepare_us / 600),
+                 (unsigned long long)(ctx->profile_commands_us / 600),
+                 (unsigned long long)(ctx->profile_sync_us / 600),
+                 (unsigned long long)(ctx->profile_vblank_us / 600));
+        ctx->clut_reused = ctx->clut_built = ctx->clut_invalidated = 0;
+        ctx->shadow_masks_evicted = ctx->shadow_textures_evicted = 0;
+        ctx->profile_prepare_us = ctx->profile_commands_us = 0;
+        ctx->profile_sync_us = ctx->profile_vblank_us = 0;
     }
 #endif
 }
@@ -858,7 +1022,10 @@ static void capture(void *userdata, video_screenshot_signal cb) {
 }
 static void scene_change(void *userdata) {
     // Only called between frames, after the GPU has completed its previous list.
-    clear_textures(userdata);
+    gu_context *ctx = userdata;
+    clear_textures(ctx);
+    ctx->clut_count = 0;
+    memset(ctx->clut_hints, 0, sizeof(ctx->clut_hints));
 }
 static void draw_atlas(void *userdata, bool enabled) {
     (void)userdata; (void)enabled;

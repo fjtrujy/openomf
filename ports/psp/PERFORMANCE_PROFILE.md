@@ -134,6 +134,13 @@ most important optimization already present in this PSP port.
 
 ## Raw local evidence (ignored build outputs)
 
+**Physical PSP follow-up:** The initial breakdown above used PPSSPP. Actual
+PSPLink profiling subsequently measured approximately **10.6 ms/frame** in
+`sceGuSync` at 222 MHz, plus less than **1.5 ms/frame** of GU CPU
+preparation/command submission. See
+[GU_PERSISTENT_CLUT_PROFILE.md](GU_PERSISTENT_CLUT_PROFILE.md) for real
+hardware timings and the latest palette-cache results.
+
 - `build/psp-frame-profile-333/evidence/game.log`
 - `build/psp-frame-profile-222/evidence/game.log`
 - `build/psp-frame-profile-software/evidence/game.log`
