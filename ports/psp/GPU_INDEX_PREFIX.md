@@ -118,6 +118,10 @@ output errors.
 - Exact shadows, dark tint and general destination remaps in combat are
   **not enabled**. The GPU index target cannot perform arbitrary
   destination-dependent operations.
+  **Subsequent milestone:** bounded exact combat shadows are now supported
+  automatically on hardware running at 333 MHz; see
+  [EXACT_COMBAT_SHADOWS.md](EXACT_COMBAT_SHADOWS.md). The remaining large and
+  mixed-effect cases still use the approximation described here.
 - The full 320×200 index snapshot still requires VRAM readback when its
   content changes; on a physical PSP this costs several milliseconds.
   Future improvements should test compact index snapshots, transfers

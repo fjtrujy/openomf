@@ -190,6 +190,10 @@ validated milestone; no incomplete GPU sidecar is enabled in this build.
 implemented on-demand GPU indexed-prefix cache used only for the intro's
 bounded exact remap tiles. It removes expensive CPU background reconstruction
 without performing an extra GPU pass during ordinary combat.
+**Combat follow-up:** [EXACT_COMBAT_SHADOWS.md](EXACT_COMBAT_SHADOWS.md)
+documents automatic exact indexed combat shadows for small effect regions at
+333 MHz. At 222 MHz, and for larger or mixed-effect regions, the GU retains
+its fast blending approximation to preserve gameplay performance.
 To compare against the full indexed software path:
 
 ```sh

@@ -29,6 +29,9 @@ implements an *on-demand* GPU prefix snapshot for the intro's exact tiles,
 with physical 222/333 MHz performance and pixel-reference validation. It
 does not enable the incomplete all-frame GPU index sidecar or general
 exact combat effects.
+The follow-up [EXACT_COMBAT_SHADOWS.md](EXACT_COMBAT_SHADOWS.md) documents
+bounded shadow-only exact corrections at 333 MHz without a persistent
+indexed framebuffer. Large and mixed combat effects remain approximate.
 
 ## Technical constraints
 
