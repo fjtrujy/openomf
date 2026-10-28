@@ -72,6 +72,10 @@
 #define PSP_EXACT_TILE_LIMIT (PSP_EXACT_EFFECT_MAX_PIXELS / (PSP_EXACT_TILE_SIZE * PSP_EXACT_TILE_SIZE))
 #define PSP_EXACT_PREFIX_MAX_COMMANDS 16
 #define PSP_EXACT_COMBAT_TILE_LIMIT 16
+#ifdef PSP_GPU_INDEXED_EFFECTS
+#define PSP_EFFECT_MASK_CACHE_COUNT 128
+#define PSP_EFFECT_MASK_CACHE_BYTES (1024u * 1024u)
+#endif
 
 #if VGA_PALETTE_SIZE != 256
 #error "PSP GU T8 textures require OpenOMF's 256-color palette build"
@@ -120,6 +124,19 @@ typedef struct {
     uint8_t remap;
 } indexed_pixel;
 
+#ifdef PSP_GPU_INDEXED_EFFECTS
+typedef struct {
+    uint8_t *data;
+    unsigned guid;
+    int src_w, src_h, w, h, pitch, tex_h, transparent;
+    int opacity, phase_x, phase_y;
+    unsigned flip;
+    bool shadow;
+    size_t bytes;
+    unsigned long recent, used_frame;
+} gu_effect_mask;
+#endif
+
 typedef struct {
 #ifndef PSP_NATIVE_DISPLAY
     SDL_Window *window;
@@ -162,12 +179,19 @@ typedef struct {
 #ifdef PSP_GU_PROFILE
     unsigned long exact_lut_hits, exact_lut_builds, exact_shadow_mask_pixels;
 #endif
+#ifdef PSP_GPU_INDEXED_EFFECTS
+    gu_effect_mask effect_masks[PSP_EFFECT_MASK_CACHE_COUNT];
+    size_t effect_mask_bytes;
+    unsigned long effect_mask_builds, effect_mask_hits;
+#endif
     // Temporary index-coded CLUTs and draw-buffer tracking for the intro's
     // infrequently changing, effect-free scene prefix.
     _Alignas(16) uint32_t indexed_clut[MAX_CLUTS][VGA_PALETTE_SIZE];
 #ifdef PSP_GU_PROFILE
     uint64_t gpu_prefix_total_us, gpu_prefix_sync_us, gpu_prefix_read_us;
     unsigned long gpu_prefix_frames, gpu_prefix_fallback;
+    uint64_t gpu_indexed_effect_us, gpu_indexed_read_us;
+    unsigned long gpu_indexed_effect_frames, gpu_indexed_rejected;
 #endif
 #endif
     uint8_t clut_hints[CLUT_HINTS]; /* Slot + 1; zero denotes no hint. */
@@ -246,10 +270,23 @@ static void clear_textures(gu_context *ctx) {
     ctx->texture_bytes = 0;
 }
 
+#ifdef PSP_GPU_INDEXED_EFFECTS
+static void clear_effect_masks(gu_context *ctx) {
+    for(int i = 0; i < PSP_EFFECT_MASK_CACHE_COUNT; ++i) {
+        free(ctx->effect_masks[i].data);
+        memset(&ctx->effect_masks[i], 0, sizeof(ctx->effect_masks[i]));
+    }
+    ctx->effect_mask_bytes = 0;
+}
+#endif
+
 static void destroy(renderer *r) {
     gu_context *ctx = r->ctx;
     if(!ctx) return;
     clear_textures(ctx);
+#ifdef PSP_GPU_INDEXED_EFFECTS
+    clear_effect_masks(ctx);
+#endif
     free(ctx->cpu_frame);
     free(ctx->cpu_prefix_frame);
     free(ctx->rgba_frame);
@@ -1180,6 +1217,7 @@ static unsigned exact_effect_tiles(const gu_context *ctx, uint8_t marked[PSP_EXA
     memset(marked, 0, PSP_EXACT_TILE_COUNT);
     const bool intro = !!(ctx->framebuffer_options & FBUFOPT_BRIGHT_DESTINATION_REMAP);
     if(!intro) {
+#ifndef PSP_GPU_INDEXED_EFFECTS
         // A shadow's remap_rounds also sets the destination-remap flag.
         // Only handle shadow-owned remaps here; separate remap, dark-tint,
         // and additive commands still take the fast combat GU path.
@@ -1188,11 +1226,18 @@ static unsigned exact_effect_tiles(const gu_context *ctx, uint8_t marked[PSP_EXA
             const draw_command *cmd = &ctx->commands[i];
             if(cmd->remap_rounds > 0 && !(cmd->options & SPRITE_SHADOW)) return 0;
         }
+#endif
     }
     unsigned count = 0;
     for(unsigned i = 0; i < ctx->command_count; ++i) {
         const draw_command *cmd = &ctx->commands[i];
+#ifdef PSP_GPU_INDEXED_EFFECTS
+        const bool effect = cmd->remap_rounds > 0 ||
+                            (cmd->options & (SPRITE_SHADOW | SPRITE_DARK_TINT));
+        if(!effect) continue;
+#else
         if(intro ? cmd->remap_rounds <= 0 : !(cmd->options & SPRITE_SHADOW)) continue;
+#endif
         const gu_texture *tex = &ctx->textures[cmd->texture];
         const omf_rect *r = &cmd->dst;
         if(r->w <= 0 || r->h <= 0) continue;
@@ -1563,6 +1608,250 @@ static int cpu_resolve_exact(gu_context *ctx, const indexed_pixel *p) {
     return ctx->exact_remap_lut[remap][iclamp(p->index)];
 }
 
+#ifdef PSP_GPU_INDEXED_EFFECTS
+static const gu_effect_mask *get_effect_mask(gu_context *ctx, const draw_command *cmd) {
+    const gu_texture *tex = &ctx->textures[cmd->texture];
+    const int w = cmd->dst.w, h = cmd->dst.h;
+    const bool shadow = !!(cmd->options & SPRITE_SHADOW);
+    const int phase_x = cmd->opacity == 255 ? 0 : (cmd->dst.x & 3);
+    const int phase_y = cmd->opacity == 255 ? 0 : (cmd->dst.y & 3);
+    if(w <= 0 || h <= 0 || w > 512 || h > 512) return NULL;
+    if(shadow && (!tex->shadow_mask ||
+                  tex->shadow_mask_transparent != cmd->transparent)) return NULL;
+    for(int i = 0; i < PSP_EFFECT_MASK_CACHE_COUNT; ++i) {
+        gu_effect_mask *mask = &ctx->effect_masks[i];
+        if(mask->data && mask->guid == tex->guid && mask->src_w == tex->w &&
+           mask->src_h == tex->h && mask->w == w && mask->h == h &&
+           mask->flip == cmd->flip && mask->shadow == shadow &&
+           mask->transparent == cmd->transparent && mask->opacity == cmd->opacity &&
+           mask->phase_x == phase_x && mask->phase_y == phase_y) {
+            mask->used_frame = ctx->frame_no;
+            mask->recent = ++ctx->use_clock;
+            ++ctx->effect_mask_hits;
+            return mask;
+        }
+    }
+    const int pitch = next_pow2(w), tex_h = next_pow2(h);
+    const size_t bytes = (size_t)pitch * tex_h;
+    if(bytes > PSP_EFFECT_MASK_CACHE_BYTES) return NULL;
+    int slot = -1;
+    while(slot < 0 || ctx->effect_mask_bytes + bytes > PSP_EFFECT_MASK_CACHE_BYTES) {
+        for(int i = 0; i < PSP_EFFECT_MASK_CACHE_COUNT; ++i)
+            if(!ctx->effect_masks[i].data) { slot = i; break; }
+        if(slot >= 0 && ctx->effect_mask_bytes + bytes <= PSP_EFFECT_MASK_CACHE_BYTES) break;
+        unsigned long oldest = ~0ul;
+        int victim = -1;
+        for(int i = 0; i < PSP_EFFECT_MASK_CACHE_COUNT; ++i) {
+            const gu_effect_mask *mask = &ctx->effect_masks[i];
+            if(mask->data && mask->used_frame != ctx->frame_no && mask->recent < oldest) {
+                oldest = mask->recent;
+                victim = i;
+            }
+        }
+        if(victim < 0) return NULL;
+        gu_effect_mask *mask = &ctx->effect_masks[victim];
+        ctx->effect_mask_bytes -= mask->bytes;
+        free(mask->data);
+        memset(mask, 0, sizeof(*mask));
+        slot = victim;
+    }
+    gu_effect_mask *mask = &ctx->effect_masks[slot];
+    uint8_t *pixels = memalign(16, bytes);
+    if(!pixels) return NULL;
+    memset(pixels, 0, bytes);
+    // Sample source indices at exactly the same integer coordinates as the
+    // VGA software renderer, including the original 4x4 opacity dithering.
+    // GE then draws one texel per logical pixel.
+    static const uint8_t bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+    for(int y = 0; y < h; ++y) {
+        int sy = y * tex->h / h;
+        if(cmd->flip & FLIP_VERTICAL) sy = tex->h - 1 - sy;
+        for(int x = 0; x < w; ++x) {
+            int sx = x * tex->w / w;
+            if(cmd->flip & FLIP_HORIZONTAL) sx = tex->w - 1 - sx;
+            uint8_t index = shadow ? tex->shadow_mask[sy * tex->pitch + sx] :
+                                     tex->data[sy * tex->pitch + sx];
+            if(cmd->opacity < 255 &&
+               bayer[((x + phase_x) & 3) | (((y + phase_y) & 3) << 2)] * 16 > cmd->opacity)
+                index = shadow ? 0 : (uint8_t)cmd->transparent;
+            pixels[y * pitch + x] = index;
+        }
+    }
+    sceKernelDcacheWritebackRange(pixels, bytes);
+    *mask = (gu_effect_mask){
+        .data=pixels, .guid=tex->guid, .src_w=tex->w, .src_h=tex->h,
+        .w=w, .h=h, .pitch=pitch, .tex_h=tex_h,
+        .transparent=cmd->transparent, .flip=cmd->flip, .shadow=shadow,
+        .opacity=cmd->opacity, .phase_x=phase_x, .phase_y=phase_y,
+        .bytes=bytes, .recent=++ctx->use_clock, .used_frame=ctx->frame_no
+    };
+    ++ctx->effect_mask_builds;
+    ctx->effect_mask_bytes += bytes;
+    return mask;
+}
+
+// Encode the *complete ordered* indexed scene into the spare 8888 GU target:
+// red = source index, green = destination remap, blue = dark-tint index.
+// Ordinary sprites replace all three values, while destination effects touch
+// only their own channels. Shadow remaps use GU_MAX to match the VGA rule
+// (shadow coverage raises, but never lowers, the destination remap).
+// We only read the marked exact-effect tiles back, not the entire framebuffer.
+static bool gpu_prepare_indexed_effect_tiles(gu_context *ctx,
+        const uint8_t marked[PSP_EXACT_TILE_COUNT]) {
+    if(ctx->framebuffer_options & FBUFOPT_CREDITS) return false;
+    int left = GAME_W, top = GAME_H, right = 0, bottom = 0;
+    for(int tile = 0; tile < PSP_EXACT_TILE_COUNT; ++tile) {
+        if(!marked[tile]) continue;
+        const omf_rect r = exact_tile_bounds(tile % PSP_EXACT_TILE_COLS, tile / PSP_EXACT_TILE_COLS);
+        left = imin(left, r.x);
+        top = imin(top, r.y);
+        right = imax(right, r.x + r.w);
+        bottom = imax(bottom, r.y + r.h);
+    }
+    if(left >= right || top >= bottom) return false;
+#ifdef PSP_GU_PROFILE
+    const uint64_t full_started = sceKernelGetSystemTimeWide();
+#endif
+    bool ready[MAX_CLUTS] = {false};
+    for(unsigned i = 0; i < ctx->command_count; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        const gu_texture *tex = &ctx->textures[cmd->texture];
+        const bool effect = (cmd->remap_rounds > 0) ||
+                            (cmd->options & (SPRITE_SHADOW | SPRITE_DARK_TINT));
+        if((cmd->options & SPRITE_INDEX_ADD) ||
+           (cmd->opacity < 255 && !(cmd->options & SPRITE_SHADOW) &&
+            (cmd->transparent < 0 || cmd->transparent >= VGA_PALETTE_SIZE)) ||
+           ((tex->w > 512 || tex->h > 512) && !tex->tile_count) ||
+           ((cmd->options & SPRITE_SHADOW) &&
+                (!tex->shadow_mask || tex->shadow_mask_transparent != cmd->transparent ||
+                 tex->tile_count)) ||
+           ((effect || cmd->opacity != 255) && !get_effect_mask(ctx, cmd)))
+            return false;
+        const unsigned slot = cmd->clut;
+        if(slot >= MAX_CLUTS) return false;
+        if(ready[slot]) continue;
+        ready[slot] = true;
+        for(int index = 0; index < VGA_PALETTE_SIZE; ++index) {
+            const bool shadow = !!(cmd->options & SPRITE_SHADOW);
+            const int source = source_index(ctx, cmd, index);
+            const bool transparent = shadow ? index == 0 : index == cmd->transparent;
+            uint32_t color = 0;
+            if(!transparent) {
+                if(cmd->options & SPRITE_DARK_TINT) {
+                    const uint8_t remap = (uint8_t)(cmd->remap_offset +
+                        MAGIC_REMAP_ROUNDS * VGA_REMAP_COUNT);
+                    color = ((uint32_t)source << 16) | ((uint32_t)remap << 8);
+                } else if(shadow || cmd->remap_rounds > 0) {
+                    const int encoded = cmd->remap_offset +
+                        cmd->remap_rounds * VGA_REMAP_COUNT + source;
+                    const uint8_t remap = (uint8_t)iclamp(encoded);
+                    color = (uint32_t)remap << 8;
+                } else {
+                    color = (uint32_t)source;
+                }
+                color |= 0xff000000u;
+            }
+            ctx->indexed_clut[slot][index] = color;
+        }
+        sceKernelDcacheWritebackRange(ctx->indexed_clut[slot], sizeof(ctx->indexed_clut[slot]));
+    }
+    if(!ctx->rgba_frame)
+        ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
+    if(!ctx->rgba_frame) return false;
+    const omf_rect ivp = {0, 0, GAME_W, GAME_H};
+    sceGuStart(GU_DIRECT, ctx->display_list);
+    sceGuDrawBufferList(GU_PSM_8888, (void *)(2 * FRAME_BYTES), BUFFER_PITCH);
+    // The other indexed pixels are never read in this pass. Keep GE fill
+    // work bounded to the union of affected tiles, not the full 320x200.
+    sceGuScissor(left, top, right - left, bottom - top);
+    sceGuPixelMask(0);
+    sceGuClearColor(0xff000000);
+    sceGuClear(GU_COLOR_BUFFER_BIT);
+    sceGuEnable(GU_BLEND);
+    sceGuTexMode(GU_PSM_T8, 0, 0, GU_FALSE);
+    sceGuTexFunc(GU_TFX_MODULATE, GU_TCC_RGBA);
+    int last_clut = -1, last_texture = -1;
+    bool last_shadow = false;
+    for(unsigned i = 0; i < ctx->command_count; ++i) {
+        const draw_command *cmd = &ctx->commands[i];
+        const bool shadow = !!(cmd->options & SPRITE_SHADOW);
+        if(shadow) {
+            sceGuPixelMask(0xffff00ffu);
+            sceGuBlendFunc(GU_MAX, GU_FIX, GU_FIX, 0xffffffffu, 0xffffffffu);
+        } else if(cmd->options & SPRITE_DARK_TINT) {
+            sceGuPixelMask(0xff0000ffu);
+            sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+        } else if(cmd->remap_rounds > 0) {
+            sceGuPixelMask(0xffff00ffu);
+            sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+        } else {
+            sceGuPixelMask(0);
+            sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+        }
+        const bool use_mask = shadow || (cmd->options & SPRITE_DARK_TINT) ||
+                              cmd->remap_rounds > 0 || cmd->opacity != 255;
+        if(use_mask) {
+            const gu_effect_mask *mask = get_effect_mask(ctx, cmd);
+            // Every draw has already been validated and its mask prepared
+            // before the GU list started. These allocations stay alive until
+            // the synchronous end of this offscreen pass.
+            if(cmd->clut != last_clut) {
+                sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
+                sceGuClutLoad(32, ctx->indexed_clut[cmd->clut]);
+            }
+            sceGuColor(0xffffffffu);
+            sceGuTexImage(0, mask->pitch, mask->tex_h, mask->pitch, mask->data);
+            gu_sprite_vertex *v = sceGuGetMemory(sizeof(*v) * 2);
+            v[0] = (gu_sprite_vertex){.u=0,.v=0,.x=cmd->dst.x,.y=cmd->dst.y,.z=0};
+            v[1] = (gu_sprite_vertex){.u=mask->w,.v=mask->h,
+                .x=cmd->dst.x + mask->w,.y=cmd->dst.y + mask->h,.z=0};
+            sceGuDrawArray(GU_SPRITES,
+                GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 2, 0, v);
+            last_texture = -1;
+        } else {
+            const bool bind_texture = cmd->texture != last_texture || shadow != last_shadow;
+            gpu_draw(ctx, cmd, &ivp, cmd->clut != last_clut, bind_texture, true);
+            last_texture = cmd->texture;
+        }
+        last_clut = cmd->clut;
+        last_shadow = shadow;
+    }
+    sceGuPixelMask(0);
+    sceGuBlendFunc(GU_ADD, GU_SRC_ALPHA, GU_ONE_MINUS_SRC_ALPHA, 0, 0);
+    sceGuDrawBufferList(GU_PSM_8888, ctx->active_draw_buffer, BUFFER_PITCH);
+    sceGuFinish();
+    sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+#ifdef PSP_GU_PROFILE
+    const uint64_t read_started = sceKernelGetSystemTimeWide();
+#endif
+    const volatile uint32_t *pixels = (const volatile uint32_t *)
+        ((uintptr_t)sceGeEdramGetAddr() + (uintptr_t)(2 * FRAME_BYTES));
+    for(int tile = 0; tile < PSP_EXACT_TILE_COUNT; ++tile) {
+        if(!marked[tile]) continue;
+        const omf_rect r = exact_tile_bounds(tile % PSP_EXACT_TILE_COLS, tile / PSP_EXACT_TILE_COLS);
+        for(int y = r.y; y < r.y + r.h; ++y)
+            for(int x = r.x; x < r.x + r.w; ++x) {
+                const uint32_t encoded = pixels[y * BUFFER_PITCH + x];
+                const indexed_pixel p = {
+                    .index=(uint8_t)encoded,
+                    .remap=(uint8_t)(encoded >> 8),
+                    .dark=(uint8_t)(encoded >> 16)
+                };
+                const vga_color c = ctx->palette.colors[cpu_resolve_exact(ctx, &p)];
+                ctx->rgba_frame[y * BUFFER_PITCH + x] = 0xff000000u |
+                    ((uint32_t)c.b << 16) | ((uint32_t)c.g << 8) | c.r;
+            }
+    }
+    sceKernelDcacheWritebackRange(ctx->rgba_frame, 512 * 256 * sizeof(uint32_t));
+#ifdef PSP_GU_PROFILE
+    ctx->gpu_indexed_effect_us += sceKernelGetSystemTimeWide() - full_started;
+    ctx->gpu_indexed_read_us += sceKernelGetSystemTimeWide() - read_started;
+    ++ctx->gpu_indexed_effect_frames;
+#endif
+    return true;
+}
+#endif
+
 static bool cpu_prepare_exact_tiles(gu_context *ctx, const uint8_t marked[PSP_EXACT_TILE_COUNT]) {
     if(!ctx->rgba_frame) ctx->rgba_frame = memalign(16, 512 * 256 * sizeof(uint32_t));
     if(!ctx->rgba_frame) return false;
@@ -1694,7 +1983,12 @@ static void finish(void *userdata) {
     // Real-PSP measurements show large combat shadows are far too expensive
     // to reconstruct at 222 MHz. Preserve the fast 60 FPS GU path at that
     // clock; permit small exact shadow regions when the CPU runs at 333 MHz.
-    const bool combat_exact = !intro_exact && (ctx->frame_effects & 2) &&
+    const bool combat_exact = !intro_exact &&
+#ifdef PSP_GPU_INDEXED_EFFECTS
+                              (ctx->frame_effects & (1 | 2 | 4)) &&
+#else
+                              (ctx->frame_effects & 2) &&
+#endif
                               scePowerGetCpuClockFrequencyInt() >= 300;
     const unsigned exact_tile_count = (!ctx->needs_cpu && (intro_exact || combat_exact)) ?
         exact_effect_tiles(ctx, exact_tiles) : 0;
@@ -1707,13 +2001,60 @@ static void finish(void *userdata) {
 #ifdef PSP_GU_PROFILE
             const uint64_t exact_start = sceKernelGetSystemTimeWide();
 #endif
-            if(!gpu_prepare_exact_prefix(ctx)) {
+            bool gpu_indexed_ready = false;
+#ifdef PSP_GPU_INDEXED_EFFECTS
+            gpu_indexed_ready = gpu_prepare_indexed_effect_tiles(ctx, exact_tiles);
+#ifdef PSP_GPU_INDEXED_VERIFY
+            if(gpu_indexed_ready && (ctx->frame_no < 300 ? ctx->frame_no % 20 == 0 :
+                                     ctx->frame_no % 180 == 0)) {
+                if(cpu_replay(ctx)) {
+                    unsigned mismatches = 0, checked = 0;
+                    unsigned base_mismatch = 0, remap_mismatch = 0, dark_mismatch = 0;
+                    const volatile uint32_t *encoded_pixels = (const volatile uint32_t *)
+                        ((uintptr_t)sceGeEdramGetAddr() + (uintptr_t)(2 * FRAME_BYTES));
+                    for(int tile = 0; tile < PSP_EXACT_TILE_COUNT; ++tile) {
+                        if(!exact_tiles[tile]) continue;
+                        const omf_rect r = exact_tile_bounds(
+                            tile % PSP_EXACT_TILE_COLS, tile / PSP_EXACT_TILE_COLS);
+                        for(int y = r.y; y < r.y + r.h; ++y)
+                            for(int x = r.x; x < r.x + r.w; ++x) {
+                                const indexed_pixel *p = &ctx->cpu_frame[y * GAME_W + x];
+                                const uint32_t encoded = encoded_pixels[y * BUFFER_PITCH + x];
+                                const int index = cpu_resolve(ctx, p);
+                                const vga_color c = ctx->palette.colors[index];
+                                const uint32_t expected = 0xff000000u |
+                                    ((uint32_t)c.b << 16) | ((uint32_t)c.g << 8) | c.r;
+                                if(ctx->rgba_frame[y * BUFFER_PITCH + x] != expected) ++mismatches;
+                                if((encoded & 255) != p->index) ++base_mismatch;
+                                if(((encoded >> 8) & 255) != p->remap) ++remap_mismatch;
+                                if(((encoded >> 16) & 255) != p->dark) ++dark_mismatch;
+                                if((encoded & 255) != p->index && base_mismatch <= 3)
+                                    log_info("GPU IDX debug base frame=%lu xy=%d,%d got=%u ref=%u",
+                                             ctx->frame_no, x,y,(unsigned)(encoded&255),p->index);
+                                if(((encoded >> 8) & 255) != p->remap && remap_mismatch <= 3)
+                                    log_info("GPU IDX debug remap frame=%lu xy=%d,%d got=%u ref=%u",
+                                             ctx->frame_no, x,y,(unsigned)((encoded>>8)&255),p->remap);
+                                ++checked;
+                            }
+                    }
+                    log_info("PSP GPU INDEXED EFFECT VERIFY: frame=%lu pixels=%u mismatches=%u",
+                             ctx->frame_no, checked, mismatches);
+                    log_info("GPU IDX CHANNEL VERIFY: base=%u remap=%u dark=%u",
+                             base_mismatch,remap_mismatch,dark_mismatch);
+                }
+            }
+#endif
+#ifdef PSP_GU_PROFILE
+            if(!gpu_indexed_ready) ++ctx->gpu_indexed_rejected;
+#endif
+#endif
+            if(!gpu_indexed_ready && !gpu_prepare_exact_prefix(ctx)) {
                 ctx->cpu_prefix_valid = false;
 #ifdef PSP_GU_PROFILE
                 ++ctx->gpu_prefix_fallback;
 #endif
             }
-            exact_tiles_ready = cpu_prepare_exact_tiles(ctx, exact_tiles);
+            exact_tiles_ready = gpu_indexed_ready || cpu_prepare_exact_tiles(ctx, exact_tiles);
 #ifdef PSP_GU_PROFILE
             if(exact_tiles_ready) {
                 ++ctx->exact_effect_frames;
@@ -1878,7 +2219,7 @@ static void finish(void *userdata) {
                  ctx->gpu_prefix_fallback);
         ctx->gpu_prefix_total_us=ctx->gpu_prefix_sync_us=ctx->gpu_prefix_read_us=0;
         ctx->gpu_prefix_frames = ctx->gpu_prefix_fallback = 0;
-        log_info("PSP GU exact effects (600 frames): exact=%lu pixels=%lu skipped=%lu replay-us=%llu",
+        log_info("PSP GU exact effects (600 frames): exact=%lu pixels=%lu skipped=%lu correction-us=%llu",
                  ctx->exact_effect_frames, ctx->exact_effect_pixels, ctx->skipped_effect_frames,
                  (unsigned long long)ctx->exact_effect_cpu_us);
         log_info("PSP GU exact combat shadows (600 frames): corrected=%lu",
@@ -1896,6 +2237,18 @@ static void finish(void *userdata) {
                  (unsigned long long)ctx->exact_prefix_us,
                  (unsigned long long)ctx->exact_replay_us,
                  (unsigned long long)ctx->exact_convert_us);
+#ifdef PSP_GPU_INDEXED_EFFECTS
+        log_info("PSP GPU indexed effects (600 frames): rendered=%lu rejected=%lu total=%lluus read+convert=%lluus",
+                 ctx->gpu_indexed_effect_frames, ctx->gpu_indexed_rejected,
+                 (unsigned long long)ctx->gpu_indexed_effect_us,
+                 (unsigned long long)ctx->gpu_indexed_read_us);
+        log_info("PSP GPU effect masks (600 frames): built=%lu hits=%lu cache=%u KiB",
+                 ctx->effect_mask_builds, ctx->effect_mask_hits,
+                 (unsigned)(ctx->effect_mask_bytes / 1024));
+        ctx->effect_mask_builds = ctx->effect_mask_hits = 0;
+        ctx->gpu_indexed_effect_frames = ctx->gpu_indexed_rejected = 0;
+        ctx->gpu_indexed_effect_us = ctx->gpu_indexed_read_us = 0;
+#endif
         ctx->cpu_prefix_hits = ctx->cpu_prefix_builds = 0;
         ctx->exact_tile_scan_us = ctx->exact_prefix_us = ctx->exact_replay_us = ctx->exact_convert_us = 0;
 #endif
@@ -1972,6 +2325,9 @@ static void scene_change(void *userdata) {
     // Only called between frames, after the GPU has completed its previous list.
     gu_context *ctx = userdata;
     clear_textures(ctx);
+#ifdef PSP_GPU_INDEXED_EFFECTS
+    clear_effect_masks(ctx);
+#endif
     ctx->clut_count = 0;
     memset(ctx->clut_hints, 0, sizeof(ctx->clut_hints));
     ctx->cpu_prefix_valid = false;

@@ -177,28 +177,29 @@ cache of up to 4 MiB of indexed textures and precomputed shadow coverage avoids
 per-frame CPU sprite rasterization.
 
 The PSP has no programmable fragment shader, so OpenOMF's effects that alter
-the *existing framebuffer's palette index* cannot be reproduced by normal
-fixed-function blending. With `PSP_GU_APPROX_EFFECTS=ON` (default), most shadows
-and dark tints use fast native GU alpha approximations. The OMF/2097 intro's
-bright destination-index remap now reconstructs affected 16×16 tiles using
-exact indexed CPU rules, with an indexed-background cache and a strict
-workload budget; oversized effects still use GU approximation. See
+the *existing framebuffer's palette index* cannot be reproduced by ordinary
+fixed-function blending. With `PSP_GU_APPROX_EFFECTS=ON` (default), large
+effects and normal 222 MHz combat still use fast GU approximations. Bounded
+intro and high-clock combat effects now use an ordered three-channel GU index
+target, plus selective CPU palette resolution **without CPU sprite replay**.
+See [GU_ORDERED_INDEXED_EFFECTS.md](GU_ORDERED_INDEXED_EFFECTS.md) for the
+implementation, measured PPSSPP parity, and remaining fallback cases. See
 [EXACT_INTRO_EFFECTS.md](EXACT_INTRO_EFFECTS.md) for the physical PSP
 benchmarks and remaining fidelity limitations. A subsequent investigation
 of persistent CPU indexed mirrors, dirty-tile updates, and a GPU index-coded
 sidecar is documented in
 [INDEXED_FRAMEBUFFER_INVESTIGATION.md](INDEXED_FRAMEBUFFER_INVESTIGATION.md).
-Its measurements rule out a full-time CPU mirror at 222 MHz and identify a
-selective GPU index-target approach as a possible future, independently
-validated milestone; no incomplete GPU sidecar is enabled in this build.
+Its measurements rule out a full-time CPU mirror at 222 MHz. The newer
+selective GPU indexed target is on demand, not a persistent all-frame sidecar.
 **Follow-up:** [GPU_INDEX_PREFIX.md](GPU_INDEX_PREFIX.md) documents the
 implemented on-demand GPU indexed-prefix cache used only for the intro's
 bounded exact remap tiles. It removes expensive CPU background reconstruction
 without performing an extra GPU pass during ordinary combat.
 **Combat follow-up:** [EXACT_COMBAT_SHADOWS.md](EXACT_COMBAT_SHADOWS.md)
 documents automatic exact indexed combat shadows for small effect regions at
-333 MHz. At 222 MHz, and for larger or mixed-effect regions, the GU retains
-its fast blending approximation to preserve gameplay performance.
+333 MHz. The later ordered GPU implementation also supports eligible mixed
+remap/tint frames. At 222 MHz, and for large effects, the GU retains its
+fast blending approximation to preserve gameplay performance.
 **Performance follow-up:**
 [EXACT_TILE_LUT_OPTIMIZATION.md](EXACT_TILE_LUT_OPTIMIZATION.md) documents
 reuse of cached shadow coverage and indexed remap lookup tables, reducing

@@ -134,7 +134,7 @@ if(NOT PSP_NATIVE_AUDIO OR PSP_SDL_AUDIO_FALLBACK)
     target_compile_definitions(openomf_psp PRIVATE ENABLE_SDL_AUDIO_BACKEND)
 endif()
 if(PSP_GU_APPROX_EFFECTS)
-    target_compile_definitions(openomf_psp PRIVATE PSP_GU_APPROX_EFFECTS)
+    target_compile_definitions(openomf_psp PRIVATE PSP_GU_APPROX_EFFECTS PSP_GPU_INDEXED_EFFECTS)
 endif()
 if(PSP_STRESS_DEMO)
     target_compile_definitions(openomf_psp PRIVATE
