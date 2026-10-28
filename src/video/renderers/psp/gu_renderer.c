@@ -9,7 +9,7 @@
  * multi-channel intermediate). For bounded intro remaps and small combat
  * shadows at high CPU clocks, we reconstruct exact indexed tiles using an
  * on-demand GU-indexed prefix. Larger effects use fast GU approximations;
- * offscreen capture retains the full indexed CPU compositor.
+ * offscreen captures use GU index readback when sprite semantics permit.
  *
  * The PSP GU owns the framebuffer and display lifecycle. omf_rect remains a
  * shared renderer interface type; a native PSP build needs no SDL window.
@@ -47,6 +47,8 @@
 #ifndef MAX_TEXTURE_BYTES
 #define MAX_TEXTURE_BYTES (4u * 1024u * 1024u)
 #endif
+#define PSP_T8_TILE_SIZE 512
+#define PSP_MAX_TEXTURE_TILES 128
 #define MAX_COMMANDS 4096
 #define MAX_CLUTS 64
 #define CLUT_HINTS 128
@@ -76,12 +78,20 @@
 #endif
 
 typedef struct {
+    uint8_t *data;
+    int x, y, w, h, pitch, tex_h;
+} gu_texture_tile;
+
+typedef struct {
     unsigned guid;
     int w, h, pitch, tex_h;
     size_t bytes;
     unsigned long recent;
     unsigned long used_frame;
     uint8_t *data; /* immutable snapshot of one source surface GUID */
+    gu_texture_tile *tiles; /* hardware-compatible pages for >512px sources */
+    uint8_t *tile_pixels; /* one aligned allocation shared by all pages */
+    unsigned tile_count;
     uint8_t *shadow_mask; /* cached four-tap coverage values */
     int shadow_mask_transparent; /* source transparent index used for cache */
 } gu_texture;
@@ -133,6 +143,7 @@ typedef struct {
     unsigned long indexed_credits_frames, indexed_capture_frames, cpu_capture_frames;
 #endif
     unsigned frame_effects;
+    void *active_draw_buffer;
     vga_palette palette;
     vga_remap_tables remaps;
     _Alignas(16) uint32_t display_list[GU_LIST_WORDS];
@@ -154,7 +165,6 @@ typedef struct {
     // Temporary index-coded CLUTs and draw-buffer tracking for the intro's
     // infrequently changing, effect-free scene prefix.
     _Alignas(16) uint32_t indexed_clut[MAX_CLUTS][VGA_PALETTE_SIZE];
-    void *active_draw_buffer;
 #ifdef PSP_GU_PROFILE
     uint64_t gpu_prefix_total_us, gpu_prefix_sync_us, gpu_prefix_read_us;
     unsigned long gpu_prefix_frames, gpu_prefix_fallback;
@@ -228,6 +238,8 @@ static const char *get_software_description(void) {
 static void clear_textures(gu_context *ctx) {
     for(int i = 0; i < MAX_TEXTURES; i++) {
         free(ctx->textures[i].data);
+        free(ctx->textures[i].tiles);
+        free(ctx->textures[i].tile_pixels);
         free(ctx->textures[i].shadow_mask);
         memset(&ctx->textures[i], 0, sizeof(ctx->textures[i]));
     }
@@ -307,9 +319,7 @@ static bool setup(void *userdata, int w, int h, bool fullscreen, bool vsync, int
     sceGuInit();
     sceGuStart(GU_DIRECT, ctx->display_list);
     sceGuDrawBuffer(GU_PSM_8888, (void *)0, BUFFER_PITCH);
-#ifdef PSP_GU_APPROX_EFFECTS
     ctx->active_draw_buffer = (void *)0;
-#endif
     sceGuDispBuffer(SCREEN_W, SCREEN_H, (void *)FRAME_BYTES, BUFFER_PITCH);
     sceGuOffset(2048 - SCREEN_W / 2, 2048 - SCREEN_H / 2);
     sceGuViewport(2048, 2048, SCREEN_W, SCREEN_H);
@@ -363,12 +373,14 @@ static bool reset_with(void *userdata, int w, int h, bool fs, bool vsync, int as
 static void reset(void *userdata) { (void)userdata; }
 
 static void close_context(void *userdata) {
-    gu_context *ctx = userdata;
     sceGuDisplay(GU_FALSE);
     sceGuTerm();
 #ifndef PSP_NATIVE_DISPLAY
+    gu_context *ctx = userdata;
     if(ctx->window) SDL_DestroyWindow(ctx->window);
     ctx->window = NULL;
+#else
+    (void)userdata;
 #endif
 }
 
@@ -376,6 +388,66 @@ static int next_pow2(int n) {
     int r = 16;
     while(r < n && r < 512) r <<= 1;
     return r;
+}
+
+static void free_cached_texture(gu_context *ctx, gu_texture *tex) {
+    ctx->texture_bytes -= tex->bytes;
+    free(tex->data);
+    free(tex->tiles);
+    free(tex->tile_pixels);
+    free(tex->shadow_mask);
+    memset(tex, 0, sizeof(*tex));
+}
+
+// Reserve a single aligned allocation for every hardware T8 page. Retain the
+// original linear image for exact indexed CPU fallback and shadow operations.
+static bool prepare_texture_tiles(gu_texture *tex, size_t *tile_bytes) {
+    const unsigned nx = ((unsigned)tex->w + PSP_T8_TILE_SIZE - 1) / PSP_T8_TILE_SIZE;
+    const unsigned ny = ((unsigned)tex->h + PSP_T8_TILE_SIZE - 1) / PSP_T8_TILE_SIZE;
+    if(!nx || !ny || nx > PSP_MAX_TEXTURE_TILES || ny > PSP_MAX_TEXTURE_TILES ||
+       nx * ny > PSP_MAX_TEXTURE_TILES) return false;
+
+    size_t bytes = 0;
+    for(unsigned row = 0; row < ny; ++row)
+        for(unsigned col = 0; col < nx; ++col) {
+            const int w = imin(PSP_T8_TILE_SIZE, tex->w - (int)col * PSP_T8_TILE_SIZE);
+            const int h = imin(PSP_T8_TILE_SIZE, tex->h - (int)row * PSP_T8_TILE_SIZE);
+            bytes += (size_t)next_pow2(w) * next_pow2(h);
+        }
+    *tile_bytes = bytes;
+    if(bytes > MAX_TEXTURE_BYTES - tex->bytes) return false;
+
+    gu_texture_tile *tiles = calloc(nx * ny, sizeof(*tiles));
+    uint8_t *pixels = memalign(16, bytes);
+    if(!tiles || !pixels) {
+        free(tiles);
+        free(pixels);
+        return false;
+    }
+    memset(pixels, 0, bytes);
+    size_t offset = 0;
+    unsigned count = 0;
+    for(unsigned row = 0; row < ny; ++row)
+        for(unsigned col = 0; col < nx; ++col) {
+            gu_texture_tile *tile = &tiles[count++];
+            tile->x = (int)col * PSP_T8_TILE_SIZE;
+            tile->y = (int)row * PSP_T8_TILE_SIZE;
+            tile->w = imin(PSP_T8_TILE_SIZE, tex->w - tile->x);
+            tile->h = imin(PSP_T8_TILE_SIZE, tex->h - tile->y);
+            tile->pitch = next_pow2(tile->w);
+            tile->tex_h = next_pow2(tile->h);
+            tile->data = pixels + offset;
+            for(int y = 0; y < tile->h; ++y)
+                memcpy(tile->data + y * tile->pitch,
+                       tex->data + (tile->y + y) * tex->pitch + tile->x,
+                       (size_t)tile->w);
+            offset += (size_t)tile->pitch * tile->tex_h;
+        }
+    sceKernelDcacheWritebackRange(pixels, bytes);
+    tex->tile_count = count;
+    tex->tiles = tiles;
+    tex->tile_pixels = pixels;
+    return true;
 }
 
 static unsigned texture_hint_key(const surface *src) {
@@ -410,9 +482,8 @@ static gu_texture *get_texture(gu_context *ctx, const surface *src) {
         }
     }
 
-    // GU indexed textures max out at 512x512. Keep larger surfaces in the
-    // same immutable cache and replay them with the CPU compositor instead of
-    // silently omitting part of a scene.
+    // Keep the native CPU layout for exact replay. Large sources can additionally
+    // be split into GU-compatible T8 pages if the texture budget permits.
     bool gpu_compatible = src->w <= 512 && src->h <= 512;
     int width = gpu_compatible ? next_pow2(src->w) : src->w;
     int height = gpu_compatible ? next_pow2(src->h) : src->h;
@@ -441,10 +512,7 @@ static gu_texture *get_texture(gu_context *ctx, const surface *src) {
         if(victim < 0) {
             return NULL;
         }
-        ctx->texture_bytes -= ctx->textures[victim].bytes;
-        free(ctx->textures[victim].data);
-        free(ctx->textures[victim].shadow_mask);
-        memset(&ctx->textures[victim], 0, sizeof(ctx->textures[victim]));
+        free_cached_texture(ctx, &ctx->textures[victim]);
         slot = victim;
     }
 
@@ -468,6 +536,37 @@ static gu_texture *get_texture(gu_context *ctx, const surface *src) {
     tex->recent = ctx->use_clock;
     tex->used_frame = ctx->frame_no;
     ctx->texture_bytes += bytes;
+    if(!gpu_compatible && !ctx->force_software) {
+        size_t tiled_bytes = 0;
+        // Never evict a texture used by earlier draws in the same frame.
+        // If there is insufficient room, preserve the original CPU fallback.
+        if(prepare_texture_tiles(tex, &tiled_bytes)) {
+            while(ctx->texture_bytes + tiled_bytes > MAX_TEXTURE_BYTES) {
+                unsigned long oldest = ~0ul;
+                int victim = -1;
+                for(int i = 0; i < MAX_TEXTURES; ++i) {
+                    const gu_texture *candidate = &ctx->textures[i];
+                    if(candidate != tex && candidate->data &&
+                       candidate->used_frame != ctx->frame_no && candidate->recent < oldest) {
+                        oldest = candidate->recent;
+                        victim = i;
+                    }
+                }
+                if(victim < 0) break;
+                free_cached_texture(ctx, &ctx->textures[victim]);
+            }
+            if(ctx->texture_bytes + tiled_bytes <= MAX_TEXTURE_BYTES) {
+                tex->bytes += tiled_bytes;
+                ctx->texture_bytes += tiled_bytes;
+            } else {
+                free(tex->tile_pixels);
+                free(tex->tiles);
+                tex->tile_pixels = NULL;
+                tex->tiles = NULL;
+                tex->tile_count = 0;
+            }
+        }
+    }
     ctx->texture_hints[hint_key] = (uint16_t)(slot + 1);
     return tex;
 }
@@ -478,7 +577,7 @@ static void prepare(void *userdata, unsigned framebuffer_options) {
     ctx->frame_no++;
     ctx->frame_effects = 0;
     ctx->offscreen = false;
-    ctx->needs_cpu = ctx->force_software || ctx->screenshot != NULL;
+    ctx->needs_cpu = ctx->force_software;
     ctx->framebuffer_options = framebuffer_options;
 }
 
@@ -515,7 +614,8 @@ static void draw(void *userdata, const surface *src, omf_rect *rect, int remap_o
         if(options & SPRITE_DARK_TINT) ctx->frame_effects |= 4;
         if(options & SPRITE_INDEX_ADD) ctx->frame_effects |= 8;
     }
-    if(tex->w > 512 || tex->h > 512) {
+    if((tex->w > 512 || tex->h > 512) &&
+       (!tex->tile_count || (options & SPRITE_SHADOW))) {
         ctx->needs_cpu = true;
     }
 }
@@ -563,10 +663,7 @@ static bool ensure_shadow_mask(gu_context *ctx, gu_texture *tex, int transparent
             }
             if(victim < 0) return false;
             gu_texture *discard = &ctx->textures[victim];
-            ctx->texture_bytes -= discard->bytes;
-            free(discard->data);
-            free(discard->shadow_mask);
-            memset(discard, 0, sizeof(*discard));
+            free_cached_texture(ctx, discard);
 #ifdef PSP_GU_PROFILE
             ++ctx->shadow_textures_evicted;
 #endif
@@ -781,7 +878,7 @@ static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *v
     if(cmd->dst.w >= GAME_W / 2 && cmd->dst.h >= GAME_H / 2)
         ++ctx->profile_background_draws;
     ctx->profile_texel_references += (unsigned long)tex->w * (unsigned long)tex->h;
-    if(bind_texture) ++ctx->profile_texture_binds;
+    ctx->profile_texture_binds += tex->tile_count ? tex->tile_count : (unsigned)bind_texture;
 #endif
     if(load_clut) {
         sceGuClutMode(GU_PSM_8888, 0, 0xff, 0);
@@ -792,7 +889,7 @@ static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *v
         sceGuClutLoad(32, ctx->clut_storage[cmd->clut]);
 #endif
     }
-    if(bind_texture) {
+    if(bind_texture && !tex->tile_count) {
 #ifdef PSP_GU_APPROX_EFFECTS
         if(cmd->options & SPRITE_SHADOW) {
             // Shadow masks are separate T8 textures even if the GUID matches.
@@ -812,6 +909,42 @@ static void gpu_draw(gu_context *ctx, const draw_command *cmd, const omf_rect *v
         (cmd->dst.w * vp->w + GAME_W / 2) / GAME_W,
         (cmd->dst.h * vp->h + GAME_H / 2) / GAME_H
     };
+    if(tex->tile_count) {
+        // Each source page maps to the corresponding portion of the original
+        // scaled/flipped rectangle; no pixels are resampled by the CPU.
+        for(unsigned t = 0; t < tex->tile_count; ++t) {
+            const gu_texture_tile *tile = &tex->tiles[t];
+            const int tx = (cmd->flip & FLIP_HORIZONTAL) ? tex->w - tile->x - tile->w : tile->x;
+            const int ty = (cmd->flip & FLIP_VERTICAL) ? tex->h - tile->y - tile->h : tile->y;
+            const float y0 = dst.y + (float)(((int64_t)ty * dst.h + tex->h - 1) / tex->h);
+            const float y1 = dst.y + (float)(((int64_t)(ty + tile->h) * dst.h + tex->h - 1) / tex->h);
+            sceGuTexImage(0, tile->pitch, tile->tex_h, tile->pitch, tile->data);
+            const bool sliced = tile->w >= PSP_GU_BLIT_MIN_WIDTH &&
+                                tile->h >= PSP_GU_BLIT_MIN_HEIGHT && dst.w > 0;
+            const unsigned strips = sliced ?
+                ((unsigned)tile->w + PSP_GU_BLIT_SLICE - 1) / PSP_GU_BLIT_SLICE : 1;
+            gu_sprite_vertex *v = sceGuGetMemory(sizeof(*v) * 2 * strips);
+            for(unsigned i = 0; i < strips; ++i) {
+                const int left = sliced ? (int)i * PSP_GU_BLIT_SLICE : 0;
+                const int right = imin(left + (sliced ? PSP_GU_BLIT_SLICE : tile->w), tile->w);
+                const float x0 = dst.x + (left == 0 ?
+                    (float)(((int64_t)tx * dst.w + tex->w - 1) / tex->w) :
+                    (float)(tx + left) * dst.w / tex->w);
+                const float x1 = dst.x + (right == tile->w ?
+                    (float)(((int64_t)(tx + right) * dst.w + tex->w - 1) / tex->w) :
+                    (float)(tx + right) * dst.w / tex->w);
+                const float u0 = (cmd->flip & FLIP_HORIZONTAL) ? tile->w - left : left;
+                const float u1 = (cmd->flip & FLIP_HORIZONTAL) ? tile->w - right : right;
+                const float v0 = (cmd->flip & FLIP_VERTICAL) ? tile->h : 0;
+                const float v1 = (cmd->flip & FLIP_VERTICAL) ? 0 : tile->h;
+                v[i * 2] = (gu_sprite_vertex){.u=u0, .v=v0, .x=x0, .y=y0, .z=0};
+                v[i * 2 + 1] = (gu_sprite_vertex){.u=u1, .v=v1, .x=x1, .y=y1, .z=0};
+            }
+            sceGuDrawArray(GU_SPRITES, GU_TEXTURE_32BITF | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                           strips * 2, 0, v);
+        }
+        return;
+    }
     if(tex->w >= PSP_GU_BLIT_MIN_WIDTH && tex->h >= PSP_GU_BLIT_MIN_HEIGHT && dst.w > 0) {
         const unsigned strips = (unsigned)(tex->w + PSP_GU_BLIT_SLICE - 1) / PSP_GU_BLIT_SLICE;
         gu_sprite_vertex *v = sceGuGetMemory(sizeof(gu_sprite_vertex) * 2 * strips);
@@ -1124,6 +1257,31 @@ static void capture_cpu(gu_context *ctx) {
     free(rgb);
 }
 
+// A hardware screenshot should capture the image actually presented by GU,
+// including approximated destination effects and the selected PSP aspect.
+// Read the finished draw buffer after GE completion instead of replaying the
+// scene into the 320x200 software compositor.
+static void capture_gpu_display(gu_context *ctx) {
+    if(!ctx->screenshot) return;
+    uint8_t *rgb = malloc(SCREEN_W * SCREEN_H * 3);
+    if(!rgb) return;
+    const volatile uint32_t *pixels = (const volatile uint32_t *)
+        ((uintptr_t)sceGeEdramGetAddr() + (uintptr_t)ctx->active_draw_buffer);
+    for(int y = 0; y < SCREEN_H; ++y) {
+        for(int x = 0; x < SCREEN_W; ++x) {
+            const uint32_t rgba = pixels[y * BUFFER_PITCH + x];
+            uint8_t *out = rgb + (y * SCREEN_W + x) * 3;
+            out[0] = (uint8_t)rgba;
+            out[1] = (uint8_t)(rgba >> 8);
+            out[2] = (uint8_t)(rgba >> 16);
+        }
+    }
+    const omf_rect r = {0, 0, SCREEN_W, SCREEN_H};
+    ctx->screenshot(&r, rgb, false);
+    ctx->screenshot = NULL;
+    free(rgb);
+}
+
 static void gpu_present_rgba_frame(gu_context *ctx, const omf_rect *vp) {
     sceGuTexMode(GU_PSM_8888, 0, 0, 0);
     sceGuTexImage(0, 512, 256, 512, ctx->rgba_frame);
@@ -1321,7 +1479,8 @@ static bool gpu_capture_area_indices(gu_context *ctx, surface *dst) {
         if(preserves_base_index(cmd)) continue;
         const gu_texture *tex = &ctx->textures[cmd->texture];
         // GU alpha blending is continuous; CPU opacity uses a Bayer mask.
-        if(cmd->opacity != 255 || tex->w > 512 || tex->h > 512)
+        if(cmd->opacity != 255 ||
+           ((tex->w > 512 || tex->h > 512) && !tex->tile_count))
             return false;
     }
     if(!gpu_render_indexed_pass(ctx, false)) return false;
@@ -1347,14 +1506,15 @@ static bool gpu_capture_area_indices(gu_context *ctx, surface *dst) {
 // A dual-channel GU index buffer can therefore replace full CPU sprite
 // replay. Only the final 64,000 indexed pixels need a palette conversion.
 static bool gpu_prepare_credits_rgba(gu_context *ctx) {
-    if(!(ctx->framebuffer_options & FBUFOPT_CREDITS) || ctx->screenshot ||
+    if(!(ctx->framebuffer_options & FBUFOPT_CREDITS) ||
        ctx->force_software || !(ctx->frame_effects & 8))
         return false;
     for(unsigned i = 0; i < ctx->command_count; ++i) {
         const draw_command *cmd = &ctx->commands[i];
         const gu_texture *tex = &ctx->textures[cmd->texture];
         if(cmd->remap_rounds != 0 || (cmd->options & (SPRITE_SHADOW | SPRITE_DARK_TINT)) ||
-           cmd->opacity != 255 || tex->w > 512 || tex->h > 512)
+           cmd->opacity != 255 ||
+           ((tex->w > 512 || tex->h > 512) && !tex->tile_count))
             return false;
     }
     if(!ctx->rgba_frame)
@@ -1594,7 +1754,7 @@ static void finish(void *userdata) {
         log_error("PSP GU CPU effect buffer unavailable");
         return;
     }
-    if(ctx->screenshot && ctx->needs_cpu) capture_cpu(ctx);
+    if(ctx->screenshot && ctx->force_software) capture_cpu(ctx);
     omf_rect vp = viewport(ctx);
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_prepared_us = sceKernelGetSystemTimeWide();
@@ -1655,6 +1815,7 @@ static void finish(void *userdata) {
     const uint64_t gu_commands_us = sceKernelGetSystemTimeWide();
 #endif
     sceGuSync(GU_SYNC_FINISH, GU_SYNC_WHAT_DONE);
+    if(ctx->screenshot) capture_gpu_display(ctx);
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_sync_ms = omf_time_ms();
     const uint64_t gu_sync_us = sceKernelGetSystemTimeWide();
@@ -1663,11 +1824,7 @@ static void finish(void *userdata) {
     // VSync OFF, cap native presentation to VBlank: otherwise the engine can
     // run thousands of frames per second in PPSSPP and animate too quickly.
     sceDisplayWaitVblankStart();
-#ifdef PSP_GU_APPROX_EFFECTS
     ctx->active_draw_buffer = sceGuSwapBuffers();
-#else
-    sceGuSwapBuffers();
-#endif
 #ifdef PSP_GU_PROFILE
     const uint64_t gu_swap_ms = omf_time_ms();
     const uint64_t gu_swap_us = sceKernelGetSystemTimeWide();

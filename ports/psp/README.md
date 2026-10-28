@@ -208,8 +208,16 @@ combat budget or changing the fast 222 MHz rendering policy.
 [GU_INDEXED_OFFSCREEN_AND_CREDITS.md](GU_INDEXED_OFFSCREEN_AND_CREDITS.md)
 documents the GU-backed robot/newsroom capture path and dual-channel indexed
 credits compositing. These remove further CPU sprite replay without introducing
-a persistent indexed mirror. Translucent/oversized captures and general
+a persistent indexed mirror. Translucent captures and general
 destination-index effects retain their existing fallback or approximation.
+**Hardware texture and screenshot follow-up:**
+[GU_TILED_TEXTURES_AND_SCREENSHOTS.md](GU_TILED_TEXTURES_AND_SCREENSHOTS.md)
+documents cached GU T8 pages for large indexed source textures and direct
+framebuffer screenshot capture. Eligible sources larger than 512 pixels no
+longer force a full software-rendered frame. The GU screenshot now records the
+actual 480x272 PSP display (including pillarboxes) rather than triggering a
+320x200 indexed CPU replay; selecting the Software backend preserves its old
+320x200 screenshot behavior.
 To compare against the full indexed software path:
 
 ```sh
