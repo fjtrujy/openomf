@@ -230,17 +230,27 @@ cmake --build build/psp-exact -j8
 That variant replays destination-index effects in a CPU framebuffer and is
 **much slower in active matches**. The separate `Software` renderer remains
 available as a fallback; the normal menu/game path defaults to `PSP GU`.
-The 320x200 game is scaled into the 480x272 PSP screen.
+The original 320x200 game canvas is scaled into the **fixed 480x272 PSP
+display**. The PSP video menu lists `RES: 480x272` rather than desktop-only
+resolutions, and PSP settings default to 480x272. Any incompatible dimensions
+loaded from configuration are normalized on PSP startup without changing the
+aspect choice. Desktop builds retain their full resolution list and original
+defaults. The current standalone PSP build uses the in-memory configuration
+backend, so changing `ASPECT` does not yet persist across restarts.
 
 The original game uses a **4:3 display aspect** despite its 320x200 VGA pixel
 grid. The default video-menu `ASPECT: 4:3` mode uses a centered 362x272
 viewport on the PSP, with 59-pixel black borders on each side. GU sprites and
 effects are clipped to these boundaries so even fighters, projectiles and
-camera shakes cannot draw into the pillarboxes. The menu's `ASPECT: NATIVE`
-setting deliberately stretches the same game to the whole 480x272 display;
-the full screen remains drawable in that mode. Scissoring is reset to the
+camera shakes cannot draw into the pillarboxes. The PSP menu's `ASPECT: FULL
+PSP` setting deliberately stretches the same 320x200 game canvas to the
+whole 480x272 display; this fills the physical screen but **does not add
+extra horizontal gameplay or increase the game's internal resolution**.
+The full screen remains drawable in that mode. Scissoring is reset to the
 whole display before clearing each frame, then applied to the unshifted
 logical viewport, preventing stale borders when the aspect mode changes.
+PSP video options which do not affect native output (desktop framebuffer
+scale, CRT/bilinear filters, VSync and windowed/fullscreen) are hidden.
 
 ### Native PSP display lifecycle
 

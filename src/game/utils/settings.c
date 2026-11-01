@@ -68,8 +68,14 @@ static const field f_language[] = {
 
 const field f_video[] = {
     F_FIXEDSTRING(settings_video, renderer, ""),
+#ifdef __PSP__
+    // The PSP display is fixed at 480x272; 320x200 remains the game canvas.
+    F_INT(settings_video, screen_w, 480),
+    F_INT(settings_video, screen_h, 272),
+#else
     F_INT(settings_video, screen_w, 640),
     F_INT(settings_video, screen_h, 400),
+#endif
     F_INT(settings_video, framerate_limit, 0),
     F_BOOL(settings_video, vsync, 0),
     F_INT(settings_video, aspect, 0),
@@ -333,6 +339,16 @@ void settings_load(void) {
         const struct_to_field *s2f = &struct_to_fields[i];
         settings_load_fields(s2f->_struct, s2f->fields, s2f->num_fields);
     }
+#ifdef __PSP__
+    // Migrate old PSP configurations that stored desktop-only resolutions.
+    // The GU always presents at the physical PSP display resolution.
+    if(_settings.video.screen_w != 480 || _settings.video.screen_h != 272) {
+        log_info("PSP video: using 480x272 output instead of saved %dx%d resolution",
+                 _settings.video.screen_w, _settings.video.screen_h);
+    }
+    _settings.video.screen_w = 480;
+    _settings.video.screen_h = 272;
+#endif
 }
 
 void settings_save(void) {

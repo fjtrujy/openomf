@@ -15,6 +15,10 @@ struct resolution_t {
     int h;
     const char *name;
 } _resolutions[] = {
+#ifdef __PSP__
+    // PSP GU has one physical output mode; aspect ratio is configured below.
+    {480, 272, "480x272"},
+#else
     {320,  200,  "320x200"  },
     {320,  240,  "320x240"  },
     {640,  400,  "640x400"  },
@@ -43,6 +47,7 @@ struct resolution_t {
     {4096, 3072, "4096x3072"},
     {7680, 4320, "7680x4320"},
     {8192, 4320, "8192x4320"},
+#endif
 };
 
 struct framerate_t {
@@ -199,9 +204,14 @@ component *menu_video_create(scene *s) {
     local->old_video_settings = settings_get()->video;
 
     // Load settings etc.
+#ifndef __PSP__
     const char *offon_opts[] = {"OFF", "ON"};
-    const char *aspect_opts[] = {"4:3", "NATIVE"};
     const char *scaling_opts[] = {"NEAREST", "BILINEAR", "CRT"};
+    const char *aspect_opts[] = {"4:3", "NATIVE"};
+#else
+    // "NATIVE" used to be ambiguous: it means stretch to the PSP display.
+    const char *aspect_opts[] = {"4:3", "FULL PSP"};
+#endif
     settings *setting = settings_get();
 
     // Create menu and its header
@@ -229,7 +239,13 @@ component *menu_video_create(scene *s) {
 
     // Resolution selector
     component *res_selector =
-        textselector_create("RES:", "Choose the game resolution to use.", resolution_toggled, local);
+        textselector_create("RES:",
+#ifdef __PSP__
+                            "PSP display is 480x272. Change ASPECT to fill the screen.",
+#else
+                            "Choose the game resolution to use.",
+#endif
+                            resolution_toggled, local);
     menu_attach(menu, res_selector);
 
     // If custom resolution is set, add it as first selection
@@ -275,6 +291,7 @@ component *menu_video_create(scene *s) {
     }
 
     // Framerate limiter selector
+#ifndef __PSP__
     component *fb_scaling = textselector_create("FB SCALE:",
                                                 "Set internal framebuffer scaling factor. You need to bump this if you "
                                                 "are using higher resolution sprites from mods.",
@@ -299,10 +316,17 @@ component *menu_video_create(scene *s) {
     // vsync and fullscreen
     menu_attach(menu, textselector_create_bind_opts("VSYNC", "Toggle vertical sync on or off.", NULL, NULL,
                                                     &setting->video.vsync, offon_opts, 2));
+#endif
+#ifdef __PSP__
+    menu_attach(menu, textselector_create_bind_opts(
+        "ASPECT", "4:3 keeps the original proportions; FULL PSP stretches to 480x272.",
+        NULL, NULL, &setting->video.aspect, aspect_opts, 2));
+#else
     menu_attach(menu, textselector_create_bind_opts("ASPECT", "Video aspect ratio. Original game is 4:3.", NULL, NULL,
                                                     &setting->video.aspect, aspect_opts, 2));
     menu_attach(menu, textselector_create_bind_opts("FULLSCREEN", "Run the game in a fullscreen window.", NULL, NULL,
                                                     &setting->video.fullscreen, offon_opts, 2));
+#endif
 
     // Done button
     menu_attach(menu, button_create("DONE", "Return to the main menu.", false, false, menu_video_done, s));
